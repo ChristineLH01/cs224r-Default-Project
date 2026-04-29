@@ -76,6 +76,16 @@ base_image = (
     )
 )
 
+# base_image = (
+#     modal.Image.debian_slim(python_version="3.11")
+#     .pip_install(["pip==25.3", "setuptools==80.10.2", "wheel==0.46.3"], extra_options="--upgrade")
+#     .pip_install_from_requirements("modal_requirements.txt", extra_index_url=PIP_EXTRA_INDEX_URL)
+#     .add_local_dir(f"{str(LOCAL_PROJECT_ROOT)}", remote_path=f"{str(REMOTE_PROJECT_ROOT)}", copy=True, ignore=["*.venv", "*__pycache__", "*wandb"],)
+#     .run_commands(
+#         f"cd {shlex.quote(str(REMOTE_PROJECT_ROOT))} && python -m pip install --no-deps -e .",
+#     ) 
+# )
+
 app = modal.App(APP_NAME)
 
 

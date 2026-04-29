@@ -63,18 +63,62 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, output_dir):
     }, os.path.join(output_dir, 'train_states.pth'))
     print(f"Model saved to {output_dir}")
 
+# Compute token-level average log-prob loss and metrics
+def forward(model, batch, device):
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    is_response_token = batch["is_response_token"].to(device)
+
+    logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+
+    # Shift for next token prediction
+    shift_logits = logits[:, :-1, :].contiguous()   # ignore last token no next prediction
+    shift_labels = input_ids[:, 1:].contiguous()    # ignore t0 no conditioning token
+    shift_mask = (is_response_token[:, 1:] * attention_mask[:, 1:]).contiguous()    # Valid response token
+
+    # Token NLL = -log p(label). Flatten then reshape back to (batch, seq_len)
+    token_nll = F.cross_entropy(
+        shift_logits.float().view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        reduction='none',
+    ).view(shift_labels.shape)
+
+    mask = shift_mask.float()
+    num_tokens = mask.sum()
+    loss = (token_nll * mask).sum() / num_tokens
+
+    # Token accuracy
+    preds = shift_logits.argmax(dim=-1)
+    num_correct = ((preds == shift_labels).float() * mask).sum()
+    return loss, num_tokens, num_correct
+
+
+@torch.no_grad()
+def evaluate(model, test_dataloader, device):
+    model.eval()
+    total_loss = 0.0
+    total_correct = 0
+    total_tokens = 0
+    for batch in test_dataloader:
+        loss, num_tokens, num_correct = forward(model, batch, device)
+        total_loss += loss.item() * num_tokens.item()
+        total_correct += num_correct.item()
+        total_tokens += num_tokens.item()
+    model.train()
+    return total_loss / total_tokens, total_correct / total_tokens
+
 def train(
-    model, 
-    tokenizer, 
-    train_dataloader, 
-    test_dataloader, 
-    optimizer, 
-    scheduler, 
-    num_epochs, 
-    device='cuda', 
-    save_model=1, 
-    output_dir='sft_model', 
-    gradient_accumulation_steps=1, 
+    model,
+    tokenizer,
+    train_dataloader,
+    test_dataloader,
+    optimizer,
+    scheduler,
+    num_epochs,
+    device='cuda',
+    save_model=1,
+    output_dir='sft_model',
+    gradient_accumulation_steps=1,
     gradient_clipping=1.0
 ):
     # TODO(student): implement the SFT optimization loop.
@@ -84,7 +128,72 @@ def train(
     # 3) Backprop, optionally clip gradients, then optimizer/scheduler steps.
     # 4) Periodically evaluate on `test_dataloader` and log metrics to W&B.
     # 5) Save checkpoints under `output_dir` when requested.
-    raise NotImplementedError("SFT is not implemented for the student project")
+
+    best_eval_loss = float('inf')
+    total_batch = 0
+
+    for epoch in range(num_epochs):
+        tqdm_bar = tqdm.tqdm(train_dataloader, desc=f"epoch {epoch}")
+
+        optimizer.zero_grad()
+
+        # To track effective batch metrics when using gradient accumulation (microbatch)
+        total_loss = 0.0
+        total_correct = 0
+        total_tokens = 0
+
+        # To track whether save the last model
+        last_is_best = False
+
+        # batch is microbatch if gradient_accumulation_steps > 1
+        for i, microbatch in enumerate(tqdm_bar):
+            loss, num_tokens, num_correct = forward(model, microbatch, device)
+            # Accumulate average loss across microbatch if enabled
+            (loss / gradient_accumulation_steps).backward()
+
+            total_loss += loss.item() * num_tokens.item()
+            total_correct += num_correct.item()
+            total_tokens += num_tokens.item()
+
+            # Effective batch after gradient accumulation
+            if (i + 1) % gradient_accumulation_steps == 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+
+                train_loss = total_loss / total_tokens
+                train_acc = total_correct / total_tokens
+                # Reset totals for next effective batch
+                total_loss = total_correct = total_tokens = 0.0
+
+                eval_loss, eval_acc = evaluate(model, test_dataloader, device)
+
+                total_batch += 1
+                wandb.log({
+                    "train/loss": train_loss,
+                    "train/accuracy": train_acc,
+                    "train/lr": scheduler.get_last_lr()[0],
+                    "eval/loss": eval_loss,
+                    "eval/accuracy": eval_acc,
+                    "train/epoch": epoch,
+                    "train/step": total_batch,
+                })
+                tqdm_bar.set_postfix({"loss": f"{train_loss:.4f}", "acc": f"{train_acc:.4f}", "step": total_batch})
+
+        print(f"Epoch {epoch+1} eval loss: {eval_loss:.4f} | eval acc: {eval_acc:.4f}")
+
+        # Save the best model
+        if save_model and eval_loss < best_eval_loss:
+            best_eval_loss = eval_loss
+            last_is_best = True
+            save_checkpoint(model, tokenizer, optimizer, scheduler, os.path.join(output_dir, 'best_model'))
+
+        clear_cache(model)
+
+    # Save the last trained model only if it differs from the best
+    if save_model and not last_is_best:
+        save_checkpoint(model, tokenizer, optimizer, scheduler, os.path.join(output_dir, 'last_model'))
 
 def main():
     parser = argparse.ArgumentParser()

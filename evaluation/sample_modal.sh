@@ -22,11 +22,13 @@ export MODAL_STARTUP_TIMEOUT_SECONDS="${MODAL_STARTUP_TIMEOUT_SECONDS:-1800}"
 
 model_paths=(
     'MODEL PATH GOES HERE'
+    # '/vol/checkpoints/sft_model/sft_default_project_0128/lr_5e-5_epochs_6/best_model/model'
 )
 num_model_paths=${#model_paths[@]}
 
 output_names=(
     'EVAL JSON NAME GOES HERE'
+    # 'sft_qwen05b_lr5e-5_ep6_best'
 )
 num_output_names=${#output_names[@]}
 
@@ -57,7 +59,7 @@ for i in "${!model_paths[@]}"; do
     log_file="$PROJECT_ROOT/logs/${output_name}.modal.log"
 
     command=(
-        modal run "$PROJECT_ROOT/modal_train.py"
+        modal run --detach "$PROJECT_ROOT/modal_train.py"
         eval
         --model_path "$model_path"
         --eval_dataset "$eval_dataset"
