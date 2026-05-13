@@ -1,0 +1,185 @@
+You are rewriting structured Countdown search traces into fluent assistant
+responses. Each input gives you a PUZZLE line and an ordered EVENTS list. Your
+output is a single completion string that:
+
+RULES (do not violate):
+1. Every STATE event must appear in the completion as the literal token
+   `<state_K>` exactly the number of times it appears in EVENTS (the same K
+   may appear more than once if reused after a backtrack). Order must match.
+2. Every BACKTRACK event must appear as the literal token `<backtrack_K>`
+   exactly once, in the order given.
+3. Every ARITH event must appear as the literal arithmetic line
+   `a op b = result` (e.g., `35 + 19 = 54`) in the order given. Do not invent
+   additional arithmetic facts and do not paraphrase the equation.
+4. Every RESUME event must be rendered as a `<think>` block whose first
+   sentence is EXACTLY `Resuming from numbers [N1, N2, ...]. ` (comma-space
+   separated values from the event), followed by reasoning about an
+   alternative path.
+5. The ANSWER event must be rendered as `<answer> EQUATION </answer>` using
+   the EXACT equation string provided.
+6. Wrap your reasoning between events in `<think>...</think>` blocks.
+   Paraphrase each BACKTRACK's `reason` field truthfully inside the `<think>`
+   block immediately preceding the `<backtrack_K>` token — do not invent
+   different mathematical justifications.
+7. Output only the completion. No markdown code fences. No commentary.
+
+EXAMPLE 1 — chain shape (no backtracks, multi-checkpoint walk)
+
+INPUT:
+PUZZLE: numbers=[3, 4, 6, 8], target=24, shape=chain
+
+EVENTS (in order):
+- STATE<state_0> numbers=[3, 4, 6, 8]
+- ARITH 8 - 6 = 2  (remaining before=[3, 4, 6, 8], after=[2, 3, 4])
+- STATE<state_1> numbers=[2, 3, 4]
+- ARITH 3 * 2 = 6  (remaining before=[2, 3, 4], after=[4, 6])
+- STATE<state_2> numbers=[4, 6]
+- ARITH 6 * 4 = 24  (remaining before=[4, 6], after=[24])
+- ANSWER<answer>((3 * (8 - 6)) * 4)</answer>
+
+OUTPUT:
+<state_0>
+<think>
+I have numbers [3, 4, 6, 8] and need to reach 24. Let me work step by step,
+checkpointing the state after each move so I can revisit it if needed.
+First step: 8 - 6 = 2 leaves me with [2, 3, 4].
+</think>
+8 - 6 = 2
+<state_1>
+<think>
+Now at numbers [2, 3, 4]. I can combine 3 and 2: 3 * 2 = 6, leaving [4, 6].
+</think>
+3 * 2 = 6
+<state_2>
+<think>
+Now at numbers [4, 6]. Multiplying gives 6 * 4 = 24, hitting the target.
+</think>
+6 * 4 = 24
+<answer> ((3 * (8 - 6)) * 4) </answer>
+
+EXAMPLE 2 — bt_inner shape (backtrack to state_1, the nearest non-root checkpoint)
+
+INPUT:
+PUZZLE: numbers=[19, 35, 44], target=98, shape=bt_inner
+
+EVENTS (in order):
+- STATE<state_0> numbers=[19, 35, 44]
+- ARITH 35 + 19 = 54  (remaining before=[19, 35, 44], after=[44, 54])
+- STATE<state_1> numbers=[44, 54]
+- ARITH 54 * 44 = 2376  (remaining before=[44, 54], after=[2376])
+- BACKTRACK<backtrack_1> reason: remaining=[2376], target=98 — single value 2376 ≠ 98
+- RESUME (target state_1) must open with exactly: "Resuming from numbers [44, 54]. "
+- ARITH 54 + 44 = 98  (remaining before=[44, 54], after=[98])
+- ANSWER<answer>((35 + 19) + 44)</answer>
+
+OUTPUT:
+<state_0>
+<think>
+I have numbers [19, 35, 44], target 98. First, I'll try adding: 35 + 19 = 54,
+which leaves me with 44 still available.
+</think>
+35 + 19 = 54
+<state_1>
+<think>
+Now at [44, 54]. Let me try multiplication: 54 * 44 = 2376.
+</think>
+54 * 44 = 2376
+<think>
+That single value, 2376, is far from the target 98 and there are no more
+numbers to combine. This branch is a dead end.
+</think>
+<backtrack_1>
+<think>
+Resuming from numbers [44, 54]. Let me try addition instead of multiplication:
+54 + 44 = 98, exactly the target.
+</think>
+54 + 44 = 98
+<answer> ((35 + 19) + 44) </answer>
+
+EXAMPLE 3 — bt_deep shape (4-num puzzle, backtrack from state_2)
+
+INPUT:
+PUZZLE: numbers=[3, 4, 6, 8], target=24, shape=bt_deep
+
+EVENTS (in order):
+- STATE<state_0> numbers=[3, 4, 6, 8]
+- ARITH 8 - 6 = 2  (remaining before=[3, 4, 6, 8], after=[2, 3, 4])
+- STATE<state_1> numbers=[2, 3, 4]
+- ARITH 3 * 2 = 6  (remaining before=[2, 3, 4], after=[4, 6])
+- STATE<state_2> numbers=[4, 6]
+- ARITH 6 + 4 = 10  (remaining before=[4, 6], after=[10])
+- BACKTRACK<backtrack_2> reason: remaining=[10], target=24 — single value 10 ≠ 24
+- RESUME (target state_2) must open with exactly: "Resuming from numbers [4, 6]. "
+- ARITH 6 * 4 = 24  (remaining before=[4, 6], after=[24])
+- ANSWER<answer>((3 * (8 - 6)) * 4)</answer>
+
+OUTPUT:
+<state_0>
+<think>
+Numbers [3, 4, 6, 8], target 24. Start with 8 - 6 = 2, leaving [2, 3, 4].
+</think>
+8 - 6 = 2
+<state_1>
+<think>
+Now at [2, 3, 4]. Multiply 3 and 2: 3 * 2 = 6, leaving [4, 6].
+</think>
+3 * 2 = 6
+<state_2>
+<think>
+Now at [4, 6]. Let me try addition first: 6 + 4 = 10.
+</think>
+6 + 4 = 10
+<think>
+The result 10 is the only value left, and it's not 24. This branch dead-ends
+right at the final step.
+</think>
+<backtrack_2>
+<think>
+Resuming from numbers [4, 6]. Let me try multiplication instead: 6 * 4 = 24,
+which hits the target exactly.
+</think>
+6 * 4 = 24
+<answer> ((3 * (8 - 6)) * 4) </answer>
+
+EXAMPLE 4 — bt_to_root shape (bad first step, backtrack all the way to root)
+
+INPUT:
+PUZZLE: numbers=[19, 35, 44], target=98, shape=bt_to_root
+
+EVENTS (in order):
+- STATE<state_0> numbers=[19, 35, 44]
+- ARITH 44 * 19 = 836  (remaining before=[19, 35, 44], after=[35, 836])
+- STATE<state_1> numbers=[35, 836]
+- BACKTRACK<backtrack_0> reason: remaining=[35, 836], target=98 — no op reaches 98: 836+35=871, 836-35=801, 836*35=29260, 836/35 not integer
+- RESUME (target state_0) must open with exactly: "Resuming from numbers [19, 35, 44]. "
+- ARITH 35 + 19 = 54  (remaining before=[19, 35, 44], after=[44, 54])
+- STATE<state_1> numbers=[44, 54]
+- ARITH 54 + 44 = 98  (remaining before=[44, 54], after=[98])
+- ANSWER<answer>((35 + 19) + 44)</answer>
+
+OUTPUT:
+<state_0>
+<think>
+I have numbers [19, 35, 44], target 98. Let me try multiplication first:
+44 * 19 = 836.
+</think>
+44 * 19 = 836
+<state_1>
+<think>
+Now at [35, 836]. Checking every operation: 836 + 35 = 871, 836 - 35 = 801,
+836 * 35 = 29260, and 836 / 35 is not an integer. None of these reach 98 —
+this checkpoint is fully unsolvable, so I'll backtrack all the way to the
+original numbers rather than try a different second step.
+</think>
+<backtrack_0>
+<think>
+Resuming from numbers [19, 35, 44]. This time I'll start with addition:
+35 + 19 = 54, leaving 44.
+</think>
+35 + 19 = 54
+<state_1>
+<think>
+Now at [44, 54]. Addition reaches the target: 54 + 44 = 98.
+</think>
+54 + 44 = 98
+<answer> ((35 + 19) + 44) </answer>

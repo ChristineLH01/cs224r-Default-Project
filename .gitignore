@@ -7,3 +7,4 @@ wandb/
 checkpoints/
 *.ckpt
 *.pt
+default_project.egg-info/
