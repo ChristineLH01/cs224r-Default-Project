@@ -157,7 +157,7 @@ def train(
 
             # Effective batch after gradient accumulation
             if (i + 1) % gradient_accumulation_steps == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()

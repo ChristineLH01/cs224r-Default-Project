@@ -37,11 +37,11 @@ curr_lr="${lrs[$which_exp]}"
 batch_size="${BATCH_SIZE:-128}"
 gradient_accumulation_steps="${GRADIENT_ACCUMULATION_STEPS:-128}"
 gradient_clipping="${GRADIENT_CLIPPING:-0.0}"
-group_size="${GROUP_SIZE:-8}"
+group_size="${GROUP_SIZE:-16}" #8
 num_training_steps="${NUM_TRAINING_STEPS:-100}"
 kl_divergence_coefficient="${KL_DIVERGENCE_COEFFICIENT:-0.001}"
 entropy_coefficient="${ENTROPY_COEFFICIENT:-0.001}"
-save_every_n_steps="${SAVE_EVERY_N_STEPS:-10}"
+save_every_n_steps="${SAVE_EVERY_N_STEPS:-25}"  #10
 lr_schedule="${LR_SCHEDULE:-constant}"
 warmup_ratio="${WARMUP_RATIO:-0.0}"
 weight_decay="${WEIGHT_DECAY:-1e-4}"
@@ -59,7 +59,7 @@ save_dir="${SAVE_DIR:-/vol/checkpoints/rloo_checkpoints}"
 wandb_name="${WANDB_NAME:-rloo_neb_lr${curr_lr}_bs${batch_size}_gs${group_size}_ent${entropy_coefficient}_kl${kl_divergence_coefficient}_lr${lr_schedule}_warmup${warmup_ratio}_temp${temperature}_topp${top_p}_topk${top_k}}"
 
 command=(
-    modal run "$PROJECT_ROOT/modal_train.py"
+    modal run --detach "$PROJECT_ROOT/modal_train.py"
     rloo
     --model_name "$model_name"
     --ref_model_name "$model_name"
