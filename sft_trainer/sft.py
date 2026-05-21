@@ -32,7 +32,15 @@ def get_model(model_name, device='cuda', use_gradient_checkpointing=True):
         trust_remote_code=True
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    
+
+    # SELS special tokens — register all 10 (state_0..4, backtrack_0..4) so they
+    # tokenize as single atomic IDs. Idempotent: re-running adds nothing.
+    sels_specials = [f"<state_{k}>" for k in range(5)] + [f"<backtrack_{k}>" for k in range(5)]
+    n_added = tokenizer.add_special_tokens({"additional_special_tokens": sels_specials})
+    if n_added > 0:
+        model.resize_token_embeddings(len(tokenizer))
+        print(f"Registered {n_added} SELS special tokens; vocab now {len(tokenizer)}")
+
     # Enable gradient checkpointing to reduce memory (trades compute for memory)
     if use_gradient_checkpointing:
         model.gradient_checkpointing_enable()

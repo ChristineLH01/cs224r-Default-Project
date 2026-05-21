@@ -20,6 +20,10 @@ from dataset_generation.skeleton_builder import (
     ResumeEvent,
     Skeleton,
     StateEvent,
+    annotate_expressions,
+    arith_fact,
+    available_tokens,
+    state_list,
     skeleton_to_spec,
 )
 
@@ -116,10 +120,12 @@ def _check_ordering(completion: str, sk: Skeleton) -> None:
 
 
 def _check_arith_lines(completion: str, sk: Skeleton) -> None:
-    """Every ArithStep must appear as 'a op b = result' somewhere in completion."""
-    for ev in sk.events:
+    """Every ArithStep must appear in expression-over-originals form,
+    e.g. '(94 - 18) / 19 = 4', so no bare intermediate is ever an operand."""
+    annos = annotate_expressions(sk)
+    for ev, anno in zip(sk.events, annos):
         if isinstance(ev, ArithStep):
-            needle = f"{ev.a} {ev.op} {ev.b} = {ev.result}"
+            needle = arith_fact(ev, anno)
             if needle not in completion:
                 raise ValidationError(f"arithmetic line {needle!r} missing from completion")
 
@@ -159,7 +165,10 @@ def _check_resume_anchors(completion: str, sk: Skeleton) -> None:
     must open with 'Resuming from numbers [...]' and list every restored number.
     """
     # Pair each BacktrackEvent with its ResumeEvent (always immediately after in our skeletons).
-    resume_events = [e for e in sk.events if isinstance(e, ResumeEvent)]
+    annos = annotate_expressions(sk)
+    resume_events = [
+        (e, anno) for e, anno in zip(sk.events, annos) if isinstance(e, ResumeEvent)
+    ]
     # Locate each <backtrack_K> occurrence in order.
     cursor = 0
     backtrack_positions: list[tuple[int, int]] = []  # (state_id, end_index in completion)
@@ -177,20 +186,21 @@ def _check_resume_anchors(completion: str, sk: Skeleton) -> None:
             f"backtrack/resume count mismatch: {len(backtrack_positions)} vs {len(resume_events)}"
         )
 
-    for (state_id, end_idx), resume in zip(backtrack_positions, resume_events):
-        # Look at the next ~400 chars for the resume template before any arithmetic line.
+    for (state_id, end_idx), (resume, anno) in zip(backtrack_positions, resume_events):
+        # Look at the next ~600 chars for the resume template before any arithmetic line.
         window = completion[end_idx : end_idx + 600]
         if "Resuming from numbers" not in window:
             raise ValidationError(
                 f"resume anchor missing after <backtrack_{state_id}>"
             )
-        # Each restored number should appear in the window before the next arithmetic.
+        # Each restored expression-over-originals should appear in the anchor segment,
+        # so the restored state is stated in terms of the original numbers.
         anchor_idx = window.find("Resuming from numbers")
-        anchor_segment = window[anchor_idx : anchor_idx + 200]
-        for n in resume.numbers:
-            if str(n) not in anchor_segment:
+        anchor_segment = window[anchor_idx : anchor_idx + 300]
+        for token in available_tokens(anno.available):
+            if token not in anchor_segment:
                 raise ValidationError(
-                    f"resume anchor after <backtrack_{state_id}> missing number {n}"
+                    f"resume anchor after <backtrack_{state_id}> missing token {token!r}"
                 )
 
 
@@ -281,17 +291,20 @@ def _selftest() -> None:
 
     # Programmatically render a compliant completion from the skeleton events
     # so the test stays in sync with whatever shape we used above.
+    annos = annotate_expressions(sk)
     parts = []
-    for ev in sk.events:
+    for ev, anno in zip(sk.events, annos):
         if isinstance(ev, StateEvent):
             parts.append(f"<state_{ev.state_id}>")
         elif isinstance(ev, ArithStep):
-            parts.append(f"{ev.a} {ev.op} {ev.b} = {ev.result}")
+            parts.append(arith_fact(ev, anno))
         elif isinstance(ev, BacktrackEvent):
             parts.append(f"<think>{ev.reason}</think>")
             parts.append(f"<backtrack_{ev.target_state_id}>")
         elif isinstance(ev, ResumeEvent):
-            parts.append(f"<think>Resuming from numbers {list(ev.numbers)}. Trying another path.</think>")
+            parts.append(
+                f"<think>Resuming from numbers {state_list(anno.available)}. Trying another path.</think>"
+            )
         elif isinstance(ev, AnswerEvent):
             parts.append(f"<answer> {ev.equation_str} </answer>")
     good = "\n".join(parts)

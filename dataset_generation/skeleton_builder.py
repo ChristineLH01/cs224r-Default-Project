@@ -13,6 +13,7 @@ The narrator only invents the natural-language wrapping inside `<think>...</thin
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -380,6 +381,85 @@ def _build_multi_bt(
 
 
 # ---------------------------------------------------------------------------
+# Expression annotation — every available "number" is rendered as an
+# expression over the ORIGINAL puzzle numbers, never as a bare intermediate
+# value. The arithmetic operand on an intermediate is its building expression
+# (e.g. "(94 - 18)"), so the final answer is a direct read-off of the last
+# step and trivially uses only the original numbers.
+# ---------------------------------------------------------------------------
+@dataclass
+class EventAnno:
+    """Per-event expression annotation, index-aligned with `Skeleton.events`."""
+    # For StateEvent / ResumeEvent: available entries as (value, expr), value-sorted.
+    available: tuple[tuple[int, str], ...] = ()
+    # For ArithStep: operand expressions over originals + the computed value.
+    a_expr: Optional[str] = None
+    b_expr: Optional[str] = None
+    result: Optional[int] = None
+
+
+def annotate_expressions(sk: Skeleton) -> list[EventAnno]:
+    """Replay the event sequence carrying an expression environment.
+
+    Each entry in the environment is a (value, expression-over-originals) pair.
+    StateEvents snapshot the environment under their state_id; Backtrack/Resume
+    restore that snapshot, discarding the abandoned branch's expressions. The
+    single residual entry after the solution path is the answer expression.
+    """
+    env: list[tuple[int, str]] = [(n, str(n)) for n in sk.numbers]
+    checkpoints: dict[int, list[tuple[int, str]]] = {}
+    annos: list[EventAnno] = []
+
+    def _apply(a: int, b: int, op: str) -> tuple[str, str, int]:
+        ia = next(i for i, (v, _) in enumerate(env) if v == a)
+        a_expr = env.pop(ia)[1]
+        ib = next(i for i, (v, _) in enumerate(env) if v == b)
+        b_expr = env.pop(ib)[1]
+        r = apply_op(a, b, op)
+        if r is None:
+            raise ValueError(f"illegal op replay {a} {op} {b}")
+        env.append((r, f"({a_expr} {op} {b_expr})"))
+        return a_expr, b_expr, r
+
+    for ev in sk.events:
+        if isinstance(ev, StateEvent):
+            checkpoints[ev.state_id] = list(env)
+            annos.append(EventAnno(available=tuple(sorted(env))))
+        elif isinstance(ev, ArithStep):
+            a_expr, b_expr, r = _apply(ev.a, ev.b, ev.op)
+            annos.append(EventAnno(a_expr=a_expr, b_expr=b_expr, result=r))
+        elif isinstance(ev, ResumeEvent):
+            env = list(checkpoints[ev.target_state_id])
+            annos.append(EventAnno(available=tuple(sorted(env))))
+        elif isinstance(ev, (BacktrackEvent, AnswerEvent)):
+            annos.append(EventAnno())
+        else:
+            raise ValueError(f"unknown event {ev!r}")
+    return annos
+
+
+def available_tokens(available: tuple[tuple[int, str], ...]) -> list[str]:
+    """Per-slot tokens: originals bare ('8'), intermediates as expr=value ('(7 * 6)=42')."""
+    return [expr if expr == str(value) else f"{expr}={value}" for value, expr in available]
+
+
+def state_list(available: tuple[tuple[int, str], ...]) -> str:
+    """'[8, 9, (7 * 6)=42]' — the marker emitted right after each <state_K> token."""
+    return "[" + ", ".join(available_tokens(available)) + "]"
+
+
+def arith_fact(ev: ArithStep, anno: EventAnno) -> str:
+    """Arithmetic line, operands as expressions over originals with the value
+    substitution shown so each step is locally checkable:
+        (7 * 6) + 9 = 42 + 9 = 51
+    Collapses to 'a op b = result' when both operands are already originals."""
+    lhs = f"{anno.a_expr} {ev.op} {anno.b_expr}"
+    if anno.a_expr == str(ev.a) and anno.b_expr == str(ev.b):
+        return f"{lhs} = {ev.result}"
+    return f"{lhs} = {ev.a} {ev.op} {ev.b} = {ev.result}"
+
+
+# ---------------------------------------------------------------------------
 # Spec rendering for the narrator
 # ---------------------------------------------------------------------------
 def skeleton_to_spec(sk: Skeleton) -> str:
@@ -388,26 +468,28 @@ def skeleton_to_spec(sk: Skeleton) -> str:
     The spec uses explicit event labels and lists every special token, every
     arithmetic step, and every dead-end reason verbatim. The narrator's job
     is to interleave `<think>...</think>` prose between these fixed pieces
-    without altering any of them.
+    without altering any of them. Every "number" is shown as an expression
+    over the original puzzle numbers so the narration — and final answer —
+    only ever reference the originals.
     """
+    annos = annotate_expressions(sk)
+    originals = list(sk.numbers)
     lines: list[str] = []
-    lines.append(f"PUZZLE: numbers={list(sk.numbers)}, target={sk.target}, shape={sk.shape}")
+    lines.append(f"PUZZLE: numbers={originals}, target={sk.target}, shape={sk.shape}")
+    lines.append(f"ORIGINAL NUMBERS (the ONLY values allowed in the final answer): {originals}")
     lines.append("")
     lines.append("EVENTS (in order — render the completion respecting this order):")
-    for ev in sk.events:
+    for ev, anno in zip(sk.events, annos):
         if isinstance(ev, StateEvent):
-            lines.append(f"- STATE<state_{ev.state_id}> numbers={list(ev.numbers)}")
+            lines.append(f"- STATE<state_{ev.state_id}> {state_list(anno.available)}")
         elif isinstance(ev, ArithStep):
-            lines.append(
-                f"- ARITH {ev.a} {ev.op} {ev.b} = {ev.result}  "
-                f"(remaining before={list(ev.remaining_before)}, after={list(ev.remaining_after)})"
-            )
+            lines.append(f"- ARITH {arith_fact(ev, anno)}")
         elif isinstance(ev, BacktrackEvent):
             lines.append(f"- BACKTRACK<backtrack_{ev.target_state_id}> reason: {ev.reason}")
         elif isinstance(ev, ResumeEvent):
             lines.append(
                 f"- RESUME (target state_{ev.target_state_id}) "
-                f'must open with exactly: "Resuming from numbers {list(ev.numbers)}. "'
+                f'must open with exactly: "Resuming from numbers {state_list(anno.available)}. "'
             )
         elif isinstance(ev, AnswerEvent):
             lines.append(f"- ANSWER<answer>{ev.equation_str}</answer>")
@@ -431,6 +513,15 @@ def _selftest() -> None:
         assert isinstance(answer, AnswerEvent)
         assert validate_equation(answer.equation_str, list(source_nums))
         assert abs(evaluate_equation(answer.equation_str) - sk.target) < 1e-5
+        # Expression replay must reach a single residual whose expr == the answer.
+        annos = annotate_expressions(sk)
+        for ev, anno in zip(sk.events, annos):
+            if isinstance(ev, ArithStep):
+                # Operand expressions must use only original numbers (no bare intermediate).
+                used = [int(n) for n in re.findall(r"\d+", f"{anno.a_expr} {anno.b_expr}")]
+                assert all(u in source_nums for u in used), (
+                    f"operand expr uses non-original number: {anno.a_expr} {ev.op} {anno.b_expr}"
+                )
         # No state_id should exceed MAX_STATE_ID.
         for e in sk.events:
             if isinstance(e, StateEvent):

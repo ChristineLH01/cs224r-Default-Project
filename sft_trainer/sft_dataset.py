@@ -6,7 +6,7 @@ can compute loss only on assistant tokens.
 """
 
 from torch.utils.data import Dataset, DataLoader
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 import os
 from transformers import AutoTokenizer
 import torch
@@ -63,7 +63,10 @@ class SFTDataset(Dataset):
         self.num_proc = num_proc
         self.split = split
 
-        self.dataset = load_dataset(dataset_name, num_proc=self.num_proc, split=split)
+        if os.path.isdir(dataset_name) and os.path.isfile(os.path.join(dataset_name, "dataset_dict.json")):
+            self.dataset = load_from_disk(dataset_name)[split]
+        else:
+            self.dataset = load_dataset(dataset_name, num_proc=self.num_proc, split=split)
         curr_map_fn = get_map_fn(self.tokenizer, self.prompt_key, self.response_key)
         self.dataset = self.dataset.map(curr_map_fn, num_proc=self.num_proc, desc="Applying chat template")
 

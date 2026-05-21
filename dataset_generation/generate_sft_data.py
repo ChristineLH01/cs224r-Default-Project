@@ -2,7 +2,8 @@
 
 Usage:
     OPENAI_API_KEY=... python dataset_generation/generate_sft_data.py \\
-        --num_examples 1500 --output dataset_generation/output/sels_sft_v1
+        --output dataset_generation/output/sels_sft_v3 --concurrency 3 \\
+        --chain 900 --bt_inner 200 --bt_to_root 100 --bt_deep 0 --multi_bt 0
 
 For local debugging without spending API credits, use --dry_run, which substitutes
 a deterministic stub narrator that emits a minimal-compliant completion.
@@ -33,7 +34,10 @@ from dataset_generation.skeleton_builder import (  # noqa: E402
     Shape,
     Skeleton,
     StateEvent,
+    annotate_expressions,
+    arith_fact,
     build_skeleton,
+    state_list,
 )
 
 # Priority order: most-restrictive shapes first so they grab 4-num puzzles before
@@ -100,21 +104,26 @@ def _try_build(
 # Dry-run stub narrator: deterministic, used for orchestrator testing.
 # ---------------------------------------------------------------------------
 async def _stub_narrate(sk: Skeleton) -> str:
-    """Emit a minimal compliant completion. Used by --dry_run."""
+    """Emit a minimal compliant completion. Used by --dry_run.
+
+    Mirrors the production format: <state_K> markers carry the available slots as
+    expressions-over-originals; one <think> block per move holds the arithmetic
+    (operands are expressions, with the value substitution shown). The backtrack
+    reason is its own <think> just before the <backtrack_K> token.
+    """
+    annos = annotate_expressions(sk)
     lines: list[str] = []
-    pending_resume: Optional[ResumeEvent] = None
-    for ev in sk.events:
+    for ev, anno in zip(sk.events, annos):
         if isinstance(ev, StateEvent):
-            lines.append(f"<state_{ev.state_id}>")
-            lines.append(f"<think>Working with numbers {list(ev.numbers)}.</think>")
+            lines.append(f"<state_{ev.state_id}> {state_list(anno.available)}")
         elif isinstance(ev, ArithStep):
-            lines.append(f"{ev.a} {ev.op} {ev.b} = {ev.result}")
+            lines.append(f"<think>{arith_fact(ev, anno)}.</think>")
         elif isinstance(ev, BacktrackEvent):
             lines.append(f"<think>{ev.reason}</think>")
             lines.append(f"<backtrack_{ev.target_state_id}>")
         elif isinstance(ev, ResumeEvent):
             lines.append(
-                f"<think>Resuming from numbers {list(ev.numbers)}. Trying another path.</think>"
+                f"<think>Resuming from numbers {state_list(anno.available)}. Trying another path.</think>"
             )
         elif isinstance(ev, AnswerEvent):
             lines.append(f"<answer> {ev.equation_str} </answer>")
@@ -305,7 +314,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_name", type=str, default="asingh15/countdown_tasks_3to4")
     parser.add_argument(
-        "--output", type=str, default="dataset_generation/output/sels_sft_v1"
+        "--output", type=str, default="dataset_generation/output/sels_sft_v3"
     )
     parser.add_argument("--num_examples", type=int, default=DEFAULT_NUM_EXAMPLES,
                         help="Total rows to generate (train + test). Default 1200 matches cog_behav.")
