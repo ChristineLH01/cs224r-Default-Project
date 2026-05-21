@@ -228,59 +228,51 @@ class RLOOUpdateWorker:
 
         # Shift for next token prediction
         logits = self.model(input_ids=input_ids_t, attention_mask=attention_mask_t).logits[:, :-1, :].float()
-        shift_targets = input_ids_t[:, 1:]
+        labels = input_ids_t[:, 1:]
         # Valid response tokens (not padding)
         loss_mask = (is_response_token_t[:, 1:] * attention_mask_t[:, 1:]).float()
 
         # Per-token target logprob 
-        # Avoid full tensor by F.log_softmax here to save memory
-        logsumexp = torch.logsumexp(logits, dim=-1)
-        gathered = logits.gather(-1, shift_targets.unsqueeze(-1)).squeeze(-1)
-        target_log_probs = (gathered - logsumexp) * loss_mask
+        log_probs_full = F.log_softmax(logits, dim=-1)
+        target_log_probs = log_probs_full.gather(-1, labels.unsqueeze(-1)).squeeze(-1) * loss_mask
         
-        # Entropy (avoid carrying full-vocab activation)
-        with torch.no_grad():
-            probs_full = F.softmax(logits, dim=-1)
-            token_entropy = logsumexp - (probs_full * logits).sum(dim=-1)
-            entropy = (token_entropy * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
-            del probs_full, token_entropy   
-        entropy_loss = -self.entropy_coefficient * entropy
-
-        # Clean large tensor to save memory
-        del logits, logsumexp, gathered
-        
-        seq_log_probs = target_log_probs.sum(dim=-1)
-
-        if sample_log_probs is not None:
-            mu_log_probs = torch.as_tensor(sample_log_probs, dtype=torch.float32, device=device)
-            log_iw = torch.clamp(seq_log_probs - mu_log_probs, max=2.0)
-            iw = torch.exp(log_iw)
-        else:
-            iw = torch.ones_like(seq_log_probs)
-
         # Leave-one-out baseline within each response group
         rewards_grouped = rewards_t.view(num_groups, self.group_size)
         group_sum = rewards_grouped.sum(dim=-1, keepdim=True)
         baseline = (group_sum - rewards_grouped) / (self.group_size - 1)
+        # Advantages
         advantages = (rewards_grouped - baseline).view(total_rows).detach()
+
+        # Importance weights
+        seq_log_probs = target_log_probs.sum(dim=-1)
+        if sample_log_probs is not None:
+            mu_log_probs = torch.as_tensor(sample_log_probs, dtype=torch.float32, device=device)
+            log_iw = torch.clamp(seq_log_probs - mu_log_probs, min=-20.0, max=20.0)
+            iw = torch.exp(log_iw).clamp(max=100.0)
+        else:
+            iw = torch.ones_like(seq_log_probs)
 
         token_count = loss_mask.sum(dim=-1).clamp(min=1.0)
         seq_log_probs_mean = seq_log_probs / token_count
-        # Policy gradient
+        # Policy gradient loss
         pg_loss = -(iw.detach() * advantages * seq_log_probs_mean).mean()
 
-        # KL penalty to reference model (k1 estimator)
+        # Entropy regularization: H = -sum_v p log p
+        probs_full = log_probs_full.exp()
+        token_entropy = -(probs_full * log_probs_full).sum(dim=-1)
+        entropy = (token_entropy * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
+        entropy_loss = -self.entropy_coefficient * entropy
+
+        # KL penalty to reference model
         kl_loss_val = torch.zeros((), device=device)
         if self.kl_divergence_coefficient > 0 and hasattr(self, 'ref_model'):
             with torch.no_grad():
                 ref_logits = self.ref_model(input_ids=input_ids_t, attention_mask=attention_mask_t).logits[:, :-1, :].float()
-                ref_logsumexp = torch.logsumexp(ref_logits, dim=-1)
-                ref_gathered = ref_logits.gather(-1, shift_targets.unsqueeze(-1)).squeeze(-1)
-                ref_target_log_probs = (ref_gathered - ref_logsumexp) * loss_mask
-                del ref_logits, ref_logsumexp, ref_gathered
-            # log p_ref is detached, gradient flows through log p_theta 
-            per_token_kl = (target_log_probs - ref_target_log_probs) * loss_mask
-            kl_loss_val = per_token_kl.sum() / loss_mask.sum().clamp(min=1.0)
+                ref_log_probs_full = F.log_softmax(ref_logits, dim=-1)
+                del ref_logits
+            # KL(pi_theta || pi_ref) = sum_v p_theta * (log p_theta - log p_ref)
+            token_kl = (probs_full * (log_probs_full - ref_log_probs_full)).sum(dim=-1)
+            kl_loss_val = (token_kl * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
 
         total_loss = pg_loss + entropy_loss + self.kl_divergence_coefficient * kl_loss_val
         # Accumulate average loss across microbatch if enabled

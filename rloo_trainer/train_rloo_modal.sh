@@ -18,7 +18,7 @@ export WANDB__SERVICE_WAIT="${WANDB__SERVICE_WAIT:-300}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-export MODAL_GPU="${MODAL_GPU:-H100!}"
+export MODAL_GPU="${MODAL_GPU:-H100!}"  # Group size = 16 requires H200
 export MODAL_VOLUME_NAME="${MODAL_VOLUME_NAME:-default-proj-training}"
 export MODAL_TIMEOUT_SECONDS="${MODAL_TIMEOUT_SECONDS:-86400}"
 export MODAL_STARTUP_TIMEOUT_SECONDS="${MODAL_STARTUP_TIMEOUT_SECONDS:-1800}"
@@ -37,11 +37,11 @@ curr_lr="${lrs[$which_exp]}"
 batch_size="${BATCH_SIZE:-128}"
 gradient_accumulation_steps="${GRADIENT_ACCUMULATION_STEPS:-128}"
 gradient_clipping="${GRADIENT_CLIPPING:-0.0}"
-group_size="${GROUP_SIZE:-16}" #8
+group_size="${GROUP_SIZE:-16}" # Original Default 8
 num_training_steps="${NUM_TRAINING_STEPS:-100}"
 kl_divergence_coefficient="${KL_DIVERGENCE_COEFFICIENT:-0.001}"
 entropy_coefficient="${ENTROPY_COEFFICIENT:-0.001}"
-save_every_n_steps="${SAVE_EVERY_N_STEPS:-25}"  #10
+save_every_n_steps="${SAVE_EVERY_N_STEPS:-25}"  # Original Default 10
 lr_schedule="${LR_SCHEDULE:-constant}"
 warmup_ratio="${WARMUP_RATIO:-0.0}"
 weight_decay="${WEIGHT_DECAY:-1e-4}"
