@@ -35,6 +35,9 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, default='evaluation/eval_results')
     parser.add_argument('--output_name', type=str, default='OUTPUT_NAME')
     parser.add_argument('--num_responses', type=int, default=16)
+    parser.add_argument('--prefix_inject', type=str, default='',
+                        help='Optional string to append to every prompt before generation '
+                             '(e.g. "<state_0>\\n" for SELS models). Empty by default.')
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -44,12 +47,15 @@ if __name__ == "__main__":
     tokenizer, llm = load_checkpoint(args.model_path, args.max_model_len, args.gpu_memory_utilization, args.max_num_batched_tokens, args.enable_chunked_prefill, args.max_num_seqs)
 
     # 2) Configure sampling with pass@k style multiple responses.
-    sampling_params = SamplingParams(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k, min_p=args.min_p, max_tokens=args.max_tokens, n=args.num_responses)
+    sampling_params = SamplingParams(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k, min_p=args.min_p, max_tokens=args.max_tokens, n=args.num_responses, skip_special_tokens=False)
 
     # 3) Load evaluation prompts and generate responses in batch.
     loaded_dataset = load_dataset(args.eval_dataset, split='test')
     prompt_df = loaded_dataset.to_pandas()
-    outputs = llm.generate(prompt_df['prompt'], sampling_params)
+    prompts_to_feed = prompt_df['prompt'].tolist()
+    if args.prefix_inject:
+        prompts_to_feed = [p + args.prefix_inject for p in prompts_to_feed]
+    outputs = llm.generate(prompts_to_feed, sampling_params)
 
     response = []
     scores = []

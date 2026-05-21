@@ -7,3 +7,13 @@ wandb/
 checkpoints/
 *.ckpt
 *.pt
+default_project.egg-info/
+
+# Run artifacts (not source) — checkpoints live on the Modal volume; eval JSONs/logs are regenerable
+logs/
+evaluation/eval_results/
+*.bak
+*.gen.log
+
+# Generated SFT datasets — not tracked in git (stored separately); regenerate via generate_sft_data.py
+dataset_generation/output/
