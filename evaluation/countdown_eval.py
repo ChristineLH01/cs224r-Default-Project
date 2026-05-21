@@ -35,9 +35,6 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, default='evaluation/eval_results')
     parser.add_argument('--output_name', type=str, default='OUTPUT_NAME')
     parser.add_argument('--num_responses', type=int, default=16)
-    parser.add_argument('--prefix_inject', type=str, default='',
-                        help='Optional string to append to every prompt before generation '
-                             '(e.g. "<state_0>\\n" for SELS models). Empty by default.')
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -52,10 +49,7 @@ if __name__ == "__main__":
     # 3) Load evaluation prompts and generate responses in batch.
     loaded_dataset = load_dataset(args.eval_dataset, split='test')
     prompt_df = loaded_dataset.to_pandas()
-    prompts_to_feed = prompt_df['prompt'].tolist()
-    if args.prefix_inject:
-        prompts_to_feed = [p + args.prefix_inject for p in prompts_to_feed]
-    outputs = llm.generate(prompts_to_feed, sampling_params)
+    outputs = llm.generate(prompt_df['prompt'], sampling_params)
 
     response = []
     scores = []
