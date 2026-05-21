@@ -23,23 +23,29 @@ import torch.nn.functional as F
 import tqdm.auto as tqdm
 # os.environ['WANDB_MODE'] = 'offline'
 
-def get_model(model_name, device='cuda', use_gradient_checkpointing=True):
-    """Load policy model + tokenizer for SFT training."""
+def get_model(model_name, device='cuda', use_gradient_checkpointing=True, register_sels_tokens=False):
+    """Load policy model + tokenizer for SFT training.
+
+    `register_sels_tokens` is the SELS-extension gate: only when True do we add
+    the 10 <state_*>/<backtrack_*> tokens and resize embeddings. Default SFT
+    (cog_behav) leaves it False so the baseline vocab stays untouched.
+    """
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, 
-        torch_dtype=torch.bfloat16, 
+        model_name,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # SELS special tokens — register all 10 (state_0..4, backtrack_0..4) so they
-    # tokenize as single atomic IDs. Idempotent: re-running adds nothing.
-    sels_specials = [f"<state_{k}>" for k in range(5)] + [f"<backtrack_{k}>" for k in range(5)]
-    n_added = tokenizer.add_special_tokens({"additional_special_tokens": sels_specials})
-    if n_added > 0:
-        model.resize_token_embeddings(len(tokenizer))
-        print(f"Registered {n_added} SELS special tokens; vocab now {len(tokenizer)}")
+    # tokenize as single atomic IDs. Gated to the SELS extension; idempotent.
+    if register_sels_tokens:
+        sels_specials = [f"<state_{k}>" for k in range(5)] + [f"<backtrack_{k}>" for k in range(5)]
+        n_added = tokenizer.add_special_tokens({"additional_special_tokens": sels_specials})
+        if n_added > 0:
+            model.resize_token_embeddings(len(tokenizer))
+            print(f"Registered {n_added} SELS special tokens; vocab now {len(tokenizer)}")
 
     # Enable gradient checkpointing to reduce memory (trades compute for memory)
     if use_gradient_checkpointing:
@@ -222,12 +228,17 @@ def main():
     parser.add_argument('--save_model', type=int, default=1)
     parser.add_argument('--gradient_checkpointing', type=int, default=1)
     parser.add_argument('--gradient_clipping', type=float, default=1.0)
+    parser.add_argument('--register_sels_tokens', type=int, default=0,
+                        help='SELS extension only: register 10 <state_*>/<backtrack_*> tokens. '
+                             'Leave 0 for default SFT to keep the baseline vocab untouched.')
     args = parser.parse_args()
 
     wandb.init(project=args.wandb_project, name=args.wandb_name)
     wandb.config.update(vars(args))
 
-    model, tokenizer = get_model(args.model_name, args.device, use_gradient_checkpointing=args.gradient_checkpointing)
+    model, tokenizer = get_model(args.model_name, args.device,
+                                 use_gradient_checkpointing=args.gradient_checkpointing,
+                                 register_sels_tokens=bool(args.register_sels_tokens))
 
     dataloaders = get_dataloaders(
         dataset_name=args.dataset_name, 

@@ -21,6 +21,8 @@ export WANDB_PROJECT="${WANDB_PROJECT:-sels_sft}"
 export WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-sels_sft_v3}"
 export LRS="${LRS:-5e-5}"
 export EPOCHS="${EPOCHS:-6}"
+# SELS extension: register the 10 <state_*>/<backtrack_*> tokens (default SFT leaves this off).
+export REGISTER_SELS_TOKENS="${REGISTER_SELS_TOKENS:-1}"
 
 # Everything else (batch_size=64, gradient_accumulation_steps=8,
 # warmup_ratio=0.05, weight_decay=0.01, max_prompt_length=512,

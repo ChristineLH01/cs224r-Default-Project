@@ -34,6 +34,9 @@ dataset_name="${DATASET_NAME:-Asap7772/cog_behav_all_strategies}"
 wandb_project="${WANDB_PROJECT:-sft_default_project_0128}"
 save_model="${SAVE_MODEL:-1}"
 gradient_checkpointing="${GRADIENT_CHECKPOINTING:-1}"
+# SELS extension gate: 0 (default) leaves the baseline vocab untouched; the SELS
+# launcher sets REGISTER_SELS_TOKENS=1 to register the 10 state/backtrack tokens.
+register_sels_tokens="${REGISTER_SELS_TOKENS:-0}"
 
 read -r -a lrs <<< "${LRS:-5e-5}"
 read -r -a epochs <<< "${EPOCHS:-6}"
@@ -70,6 +73,7 @@ for i in "${!lrs[@]}"; do
         --wandb_name "$wandb_name"
         --save_model "$save_model"
         --gradient_checkpointing "$gradient_checkpointing"
+        --register_sels_tokens "$register_sels_tokens"
     )
 
     printf 'Executing command: '
