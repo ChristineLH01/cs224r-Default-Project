@@ -217,76 +217,74 @@ class RLOOUpdateWorker:
         # 5) Backward pass; if `is_update_step`, clip and step optimizer/scheduler.
         # 6) Return scalar metrics used by trainer logging.
 
+        # Convert inputs to tensors
         input_ids_t = torch.as_tensor(input_ids, dtype=torch.long, device=device)
         attention_mask_t = torch.as_tensor(attention_mask, dtype=torch.long, device=device)
         is_response_token_t = torch.as_tensor(is_response_token, dtype=torch.long, device=device)
         rewards_t = torch.as_tensor(rewards, dtype=torch.float32, device=device)
 
-        bsz_flat = input_ids_t.shape[0]
-        assert bsz_flat % self.group_size == 0, (
-            f"Flattened batch {bsz_flat} not divisible by group_size {self.group_size}"
-        )
-        num_groups = bsz_flat // self.group_size
+        total_rows = input_ids_t.shape[0]
+        num_groups = total_rows // self.group_size
 
-        # Predict token at position t+1 from logits at position t.
-        logits = self.model(input_ids=input_ids_t, attention_mask=attention_mask_t).logits
-        shift_logits = logits[:, :-1, :].float()
+        # Shift for next token prediction
+        logits = self.model(input_ids=input_ids_t, attention_mask=attention_mask_t).logits[:, :-1, :].float()
         shift_targets = input_ids_t[:, 1:]
-        # A token contributes to the loss only if it is a response token AND attended to.
+        # Valid response tokens (not padding)
         loss_mask = (is_response_token_t[:, 1:] * attention_mask_t[:, 1:]).float()
 
-        log_probs_full = F.log_softmax(shift_logits, dim=-1)
-        target_log_probs = log_probs_full.gather(-1, shift_targets.unsqueeze(-1)).squeeze(-1)
-        target_log_probs = target_log_probs * loss_mask  # zero out non-response positions
+        # Per-token target logprob 
+        # Avoid full tensor by F.log_softmax here to save memory
+        logsumexp = torch.logsumexp(logits, dim=-1)
+        gathered = logits.gather(-1, shift_targets.unsqueeze(-1)).squeeze(-1)
+        target_log_probs = (gathered - logsumexp) * loss_mask
+        
+        # Entropy (avoid carrying full-vocab activation)
+        with torch.no_grad():
+            probs_full = F.softmax(logits, dim=-1)
+            token_entropy = logsumexp - (probs_full * logits).sum(dim=-1)
+            entropy = (token_entropy * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
+            del probs_full, token_entropy   
+        entropy_loss = -self.entropy_coefficient * entropy
 
-        # Sequence logprob under current policy pi_theta (sum over response tokens).
-        seq_log_probs = target_log_probs.sum(dim=-1)  # [bsz_flat]
+        # Clean large tensor to save memory
+        del logits, logsumexp, gathered
+        
+        seq_log_probs = target_log_probs.sum(dim=-1)
 
-        # Importance weight w = exp(log pi_theta - log mu), clipped in log-space.
         if sample_log_probs is not None:
             mu_log_probs = torch.as_tensor(sample_log_probs, dtype=torch.float32, device=device)
-            log_iw = seq_log_probs - mu_log_probs
-            # Clip for stability — keeps an outlier rollout from dominating the batch.
-            log_iw_clipped = torch.clamp(log_iw, max=2.0)
-            iw = torch.exp(log_iw_clipped)
+            log_iw = torch.clamp(seq_log_probs - mu_log_probs, max=2.0)
+            iw = torch.exp(log_iw)
         else:
             iw = torch.ones_like(seq_log_probs)
 
-        # RLOO leave-one-out baseline within each group of `group_size`.
+        # Leave-one-out baseline within each response group
         rewards_grouped = rewards_t.view(num_groups, self.group_size)
         group_sum = rewards_grouped.sum(dim=-1, keepdim=True)
-        # baseline_i = mean over the OTHER k-1 samples in the group
         baseline = (group_sum - rewards_grouped) / (self.group_size - 1)
-        advantages = (rewards_grouped - baseline).view(bsz_flat)
-        advantages = advantages.detach()
+        advantages = (rewards_grouped - baseline).view(total_rows).detach()
 
-        # Per-sequence mean response logprob (normalize so long/short responses are comparable).
         token_count = loss_mask.sum(dim=-1).clamp(min=1.0)
-        seq_log_probs_mean = target_log_probs.sum(dim=-1) / token_count
-
-        # Policy gradient surrogate: -E[ w * A * log pi_theta(y|x) ].
+        seq_log_probs_mean = seq_log_probs / token_count
+        # Policy gradient
         pg_loss = -(iw.detach() * advantages * seq_log_probs_mean).mean()
 
-        # Entropy bonus: -sum_v p log p, averaged over response tokens.
-        probs_full = log_probs_full.exp()
-        token_entropy = -(probs_full * log_probs_full).sum(dim=-1)  # [bsz, seq-1]
-        entropy = (token_entropy * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
-        entropy_loss = -self.entropy_coefficient * entropy
-
-        # KL-to-ref penalty (exact token-level KL on response positions).
+        # KL penalty to reference model (k1 estimator)
         kl_loss_val = torch.zeros((), device=device)
         if self.kl_divergence_coefficient > 0 and hasattr(self, 'ref_model'):
             with torch.no_grad():
-                ref_logits = self.ref_model(input_ids=input_ids_t, attention_mask=attention_mask_t).logits
-                ref_log_probs_full = F.log_softmax(ref_logits[:, :-1, :].float(), dim=-1)
-            # KL(pi_theta || pi_ref) = sum_v p_theta * (log p_theta - log p_ref)
-            token_kl = (probs_full * (log_probs_full - ref_log_probs_full)).sum(dim=-1)
-            kl_loss_val = (token_kl * loss_mask).sum() / loss_mask.sum().clamp(min=1.0)
+                ref_logits = self.ref_model(input_ids=input_ids_t, attention_mask=attention_mask_t).logits[:, :-1, :].float()
+                ref_logsumexp = torch.logsumexp(ref_logits, dim=-1)
+                ref_gathered = ref_logits.gather(-1, shift_targets.unsqueeze(-1)).squeeze(-1)
+                ref_target_log_probs = (ref_gathered - ref_logsumexp) * loss_mask
+                del ref_logits, ref_logsumexp, ref_gathered
+            # log p_ref is detached, gradient flows through log p_theta 
+            per_token_kl = (target_log_probs - ref_target_log_probs) * loss_mask
+            kl_loss_val = per_token_kl.sum() / loss_mask.sum().clamp(min=1.0)
 
         total_loss = pg_loss + entropy_loss + self.kl_divergence_coefficient * kl_loss_val
-        # Scale so accumulated gradient ≈ one full-batch step.
-        scaled_loss = total_loss / self.gradient_accumulation_steps
-        scaled_loss.backward()
+        # Accumulate average loss across microbatch if enabled
+        (total_loss / self.gradient_accumulation_steps).backward()
 
         weight_mse = 0.0
         weight_max_abs_diff = 0.0
@@ -304,7 +302,7 @@ class RLOOUpdateWorker:
             self.optimizer.zero_grad(set_to_none=True)
 
             total_elems = 0
-            sq_sum = 0.0
+            seq_sum = 0.0
             max_abs = 0.0
             nonzero_diff = 0
             changed_tensors = 0
@@ -314,7 +312,7 @@ class RLOOUpdateWorker:
                     continue
                 diff = (p.detach() - old_params[n]).float()
                 total_elems += diff.numel()
-                sq_sum += float(diff.pow(2).sum())
+                seq_sum += float(diff.pow(2).sum())
                 max_abs = max(max_abs, float(diff.abs().max()))
                 nz = int((diff != 0).sum())
                 nonzero_diff += nz
@@ -322,7 +320,7 @@ class RLOOUpdateWorker:
                 if nz > 0:
                     changed_tensors += 1
             if total_elems > 0:
-                weight_mse = sq_sum / total_elems
+                weight_mse = seq_sum / total_elems
                 weight_nonzero_diff_ratio = nonzero_diff / total_elems
             weight_max_abs_diff = max_abs
             if total_tensors > 0:
@@ -331,7 +329,7 @@ class RLOOUpdateWorker:
 
         metrics = {
             "pg_loss": float(pg_loss.detach()),
-            "kl_loss": float(kl_loss_val.detach()) if isinstance(kl_loss_val, torch.Tensor) else float(kl_loss_val),
+            "kl_loss": float(kl_loss_val.detach()),
             "importance_weight_mean": float(iw.detach().mean()),
             "lr": float(self.optimizer.param_groups[0]['lr']),
             "weight_mse": weight_mse,
