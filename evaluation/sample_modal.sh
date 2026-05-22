@@ -21,14 +21,12 @@ export MODAL_TIMEOUT_SECONDS="${MODAL_TIMEOUT_SECONDS:-86400}"
 export MODAL_STARTUP_TIMEOUT_SECONDS="${MODAL_STARTUP_TIMEOUT_SECONDS:-1800}"
 
 model_paths=(
-    'MODEL PATH GOES HERE'
-    # '/vol/checkpoints/sft_model/sft_default_project_0128/lr_5e-5_epochs_6/best_model/model'
+    '/vol/checkpoints/sft_model/sels_sft/sels_sft_v5/best_model/model'
 )
 num_model_paths=${#model_paths[@]}
 
 output_names=(
-    'EVAL JSON NAME GOES HERE'
-    # 'sft_qwen05b_lr5e-5_ep6_best'
+    'sels_sft_v5_best'
 )
 num_output_names=${#output_names[@]}
 

@@ -106,28 +106,27 @@ def _try_build(
 async def _stub_narrate(sk: Skeleton) -> str:
     """Emit a minimal compliant completion. Used by --dry_run.
 
-    Mirrors the production format: <state_K> markers carry the available slots as
-    expressions-over-originals; one <think> block per move holds the arithmetic
-    (operands are expressions, with the value substitution shown). The backtrack
-    reason is its own <think> just before the <backtrack_K> token.
+    v4 format: ONE <think> block wraps the whole structured search (every op makes
+    a <state_K> with expressions-over-originals; backtracks go to a shallower state;
+    arith shown with value substitution). The <answer> is outside the think.
     """
     annos = annotate_expressions(sk)
-    lines: list[str] = []
+    answer = sk.events[-1]
+    body: list[str] = ["<think>"]
     for ev, anno in zip(sk.events, annos):
         if isinstance(ev, StateEvent):
-            lines.append(f"<state_{ev.state_id}> {state_list(anno.available)}")
+            body.append(f"<state_{ev.state_id}> {state_list(anno.available)}")
         elif isinstance(ev, ArithStep):
-            lines.append(f"<think>{arith_fact(ev, anno)}.</think>")
+            body.append(f"{arith_fact(ev, anno)}.")
         elif isinstance(ev, BacktrackEvent):
-            lines.append(f"<think>{ev.reason}</think>")
-            lines.append(f"<backtrack_{ev.target_state_id}>")
+            body.append(ev.reason)
+            body.append(f"<backtrack_{ev.target_state_id}>")
         elif isinstance(ev, ResumeEvent):
-            lines.append(
-                f"<think>Resuming from numbers {state_list(anno.available)}. Trying another path.</think>"
-            )
-        elif isinstance(ev, AnswerEvent):
-            lines.append(f"<answer> {ev.equation_str} </answer>")
-    return "\n".join(lines)
+            # v5: no resume preamble — the restored <state_K> (next event) speaks for itself.
+            continue
+    body.append("</think>")
+    body.append(f"<answer> {answer.equation_str} </answer>")
+    return "\n".join(body)
 
 
 # ---------------------------------------------------------------------------

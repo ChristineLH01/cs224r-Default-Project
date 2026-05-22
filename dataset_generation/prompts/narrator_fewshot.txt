@@ -8,52 +8,70 @@ checkpoint are written as that expression list, and the final answer is a
 direct read-off of the last arithmetic line. The only values allowed in the
 final <answer> are the ORIGINAL NUMBERS.
 
+STRUCTURE: the ENTIRE search lives inside ONE `<think>...</think>` block. The
+special tokens (`<state_K>`, `<backtrack_K>`) appear inside that block, each on
+its own line, in the given order, with your natural-language reasoning and the
+arithmetic lines interleaved between them. The `<answer>` comes AFTER `</think>`.
+
+VOICE: write like someone genuinely searching — state a short plan or motivation
+for the next move ("target is 24, a product just above it that I can trim
+back…"), then carry it out. At a dead end, name the operation you tried and say
+concretely why it fails before you backtrack. Keep it logical and economical;
+never invent arithmetic or restate a value that the given lines do not contain.
+
 RULES (do not violate):
-1. Every STATE event appears as the literal token `<state_K>` immediately
+1. The completion has EXACTLY ONE `<think>` and ONE `</think>`. Everything from
+   `<state_0>` through the last state is inside it. `<answer>` is after `</think>`.
+2. Every STATE event appears as the literal token `<state_K>` immediately
    followed by its bracket list EXACTLY as given, e.g.
-   `<state_1> [44, (35 + 19)=54]`. Match the order; the same K may reappear
-   after a backtrack.
-2. Every BACKTRACK event appears as the literal token `<backtrack_K>`, in order.
-3. Every ARITH event must appear as its literal line EXACTLY as given, e.g.
+   `<state_1> [44, (35 + 19)=54]`. Nothing may come between the token and its
+   list. Match the order; the same K may reappear after a backtrack.
+3. Every BACKTRACK event appears as the literal token `<backtrack_K>` on its own
+   line, in order.
+4. Every ARITH event must appear as its literal line EXACTLY as given, e.g.
    `(35 + 19) + 44 = 54 + 44 = 98` or `35 + 19 = 54`. Operands are expressions
    over the original numbers; the value substitution is shown so the step is
    checkable. Do not paraphrase or re-evaluate the arithmetic.
-4. Every RESUME event is rendered inside a `<think>` block whose first sentence
-   is EXACTLY `Resuming from numbers [...]. ` (the bracket list from the event),
-   followed by reasoning about the alternative path.
-5. The ANSWER event is rendered as `<answer> EQUATION </answer>` using the EXACT
+5. For a dead-end, state the attempt and why it fails (paraphrasing the
+   BACKTRACK reason truthfully) in the line(s) right before the `<backtrack_K>`
+   token.
+6. A `<backtrack_K>` token is IMMEDIATELY followed on the next line by the
+   restored `<state_K>` and its exact bracket list — no "resuming" preamble, no
+   text in between. Put the reasoning about the new path AFTER that restored
+   state line.
+7. The ANSWER event is rendered as `<answer> EQUATION </answer>` using the EXACT
    equation string provided.
-6. Put your natural-language reasoning AND each arithmetic line inside
-   `<think>...</think>` blocks — one block per move. For a dead-end, state the
-   attempt and why it fails (paraphrasing the BACKTRACK reason truthfully) in a
-   single `<think>` block right before the `<backtrack_K>` token.
-7. Output only the completion. No markdown code fences. No commentary.
+8. Output only the completion. No markdown code fences. No commentary.
 
-EXAMPLE 1 — chain shape (no backtracks, multi-checkpoint walk)
+EXAMPLE 1 — chain shape (no backtracks; product-minus-remainder plan)
 
 INPUT:
-PUZZLE: numbers=[3, 4, 6, 8], target=24, shape=chain
-ORIGINAL NUMBERS (the ONLY values allowed in the final answer): [3, 4, 6, 8]
+PUZZLE: numbers=[2, 5, 7, 9], target=24, shape=chain
+ORIGINAL NUMBERS (the ONLY values allowed in the final answer): [2, 5, 7, 9]
 
 EVENTS (in order — render the completion respecting this order):
-- STATE<state_0> [3, 4, 6, 8]
-- ARITH 4 * 3 = 12
-- STATE<state_1> [6, 8, (4 * 3)=12]
-- ARITH 8 - 6 = 2
-- STATE<state_2> [(8 - 6)=2, (4 * 3)=12]
-- ARITH (4 * 3) * (8 - 6) = 12 * 2 = 24
-- ANSWER<answer>((4 * 3) * (8 - 6))</answer>
+- STATE<state_0> [2, 5, 7, 9]
+- ARITH 7 * 5 = 35
+- STATE<state_1> [2, 9, (7 * 5)=35]
+- ARITH 9 + 2 = 11
+- STATE<state_2> [(9 + 2)=11, (7 * 5)=35]
+- ARITH (7 * 5) - (9 + 2) = 35 - 11 = 24
+- STATE<state_3> [((7 * 5) - (9 + 2))=24]
+- ANSWER<answer>((7 * 5) - (9 + 2))</answer>
 
 OUTPUT:
-<state_0> [3, 4, 6, 8]
-<think>I have [3, 4, 6, 8], target 24. Let me start by multiplying 4 and 3: 4 * 3 = 12. That leaves 6 and 8 alongside (4 * 3).</think>
-<state_1> [6, 8, (4 * 3)=12]
-<think>Now I'll combine 6 and 8: 8 - 6 = 2. That leaves (8 - 6) and (4 * 3).</think>
-<state_2> [(8 - 6)=2, (4 * 3)=12]
-<think>Multiply the two remaining expressions: (4 * 3) * (8 - 6) = 12 * 2 = 24, exactly the target.</think>
-<answer> ((4 * 3) * (8 - 6)) </answer>
+<think>
+<state_0> [2, 5, 7, 9]
+Target is 24. A product just above 24 that I can trim back is the natural plan: 7 * 5 = 35 overshoots by 11, so if I can build 11 from the leftover 2 and 9, subtracting it lands exactly on 24.
+<state_1> [2, 9, (7 * 5)=35]
+Build that 11 from what's left: 9 + 2 = 11, precisely the gap I need.
+<state_2> [(9 + 2)=11, (7 * 5)=35]
+Now subtract it from the product: (7 * 5) - (9 + 2) = 35 - 11 = 24, the target.
+<state_3> [((7 * 5) - (9 + 2))=24]
+</think>
+<answer> ((7 * 5) - (9 + 2)) </answer>
 
-EXAMPLE 2 — bt_inner shape (backtrack to state_1, the nearest non-root checkpoint)
+EXAMPLE 2 — bt_inner shape (one backtrack to state_1, the nearest non-root checkpoint)
 
 INPUT:
 PUZZLE: numbers=[19, 35, 44], target=98, shape=bt_inner
@@ -64,44 +82,107 @@ EVENTS (in order — render the completion respecting this order):
 - ARITH 35 + 19 = 54
 - STATE<state_1> [44, (35 + 19)=54]
 - ARITH (35 + 19) - 44 = 54 - 44 = 10
+- STATE<state_2> [((35 + 19) - 44)=10]
 - BACKTRACK<backtrack_1> reason: remaining=[10], target=98 — single value 10 ≠ 98
-- RESUME (target state_1) must open with exactly: "Resuming from numbers [44, (35 + 19)=54]. "
-- ARITH (35 + 19) + 44 = 54 + 44 = 98
-- ANSWER<answer>((35 + 19) + 44)</answer>
-
-OUTPUT:
-<state_0> [19, 35, 44]
-<think>I have [19, 35, 44], target 98. First I'll add: 35 + 19 = 54, which leaves 44 alongside (35 + 19).</think>
-<state_1> [44, (35 + 19)=54]
-<think>Let me try (35 + 19) - 44 = 54 - 44 = 10. That collapses to a single value 10, which is not 98 and leaves nothing else to combine — a dead end.</think>
-<backtrack_1>
-<think>Resuming from numbers [44, (35 + 19)=54]. Instead of subtracting, I'll add: (35 + 19) + 44 = 54 + 44 = 98, exactly the target.</think>
-<answer> ((35 + 19) + 44) </answer>
-
-EXAMPLE 3 — bt_to_root shape (bad first step, backtrack all the way to root)
-
-INPUT:
-PUZZLE: numbers=[19, 35, 44], target=98, shape=bt_to_root
-ORIGINAL NUMBERS (the ONLY values allowed in the final answer): [19, 35, 44]
-
-EVENTS (in order — render the completion respecting this order):
-- STATE<state_0> [19, 35, 44]
-- ARITH 44 - 35 = 9
-- STATE<state_1> [(44 - 35)=9, 19]
-- BACKTRACK<backtrack_0> reason: remaining=[9, 19], target=98 — no op reaches 98: 19+9=28, 19-9=10, 19*9=171, 19/9 not integer
-- RESUME (target state_0) must open with exactly: "Resuming from numbers [19, 35, 44]. "
-- ARITH 35 + 19 = 54
+- RESUME state_1: the next STATE line is the restored checkpoint — emit it immediately after the backtrack token, with no preamble
 - STATE<state_1> [44, (35 + 19)=54]
 - ARITH (35 + 19) + 44 = 54 + 44 = 98
+- STATE<state_2> [((35 + 19) + 44)=98]
 - ANSWER<answer>((35 + 19) + 44)</answer>
 
 OUTPUT:
+<think>
 <state_0> [19, 35, 44]
-<think>I have [19, 35, 44], target 98. Let me try 44 - 35 = 9, leaving (44 - 35) and 19.</think>
-<state_1> [(44 - 35)=9, 19]
-<think>From here only 9 and 19 remain: 19 + 9 = 28, 19 - 9 = 10, 19 * 9 = 171, and 19 / 9 is not an integer — none reach 98. This whole branch is unsolvable, so I'll backtrack all the way to the original numbers.</think>
-<backtrack_0>
-<think>Resuming from numbers [19, 35, 44]. This time I'll start with addition: 35 + 19 = 54, leaving 44 alongside (35 + 19).</think>
+Target 98 is large, so I want to combine the two bigger contributions and fold in the rest. Begin with 35 + 19 = 54, holding 44 in reserve.
 <state_1> [44, (35 + 19)=54]
-<think>Now (35 + 19) + 44 = 54 + 44 = 98, exactly the target.</think>
+My first instinct is to take the 44 away: (35 + 19) - 44 = 54 - 44 = 10.
+<state_2> [((35 + 19) - 44)=10]
+That collapses everything into the single value 10 with no numbers left to grow it toward 98 — a dead end.
+<backtrack_1>
+<state_1> [44, (35 + 19)=54]
+Back at this checkpoint, subtraction was the wrong direction; adding the 44 instead closes the gap: (35 + 19) + 44 = 54 + 44 = 98, exactly the target.
+<state_2> [((35 + 19) + 44)=98]
+</think>
 <answer> ((35 + 19) + 44) </answer>
+
+EXAMPLE 3 — bt_to_root shape (a 2-number dead end, then backtrack all the way to root)
+
+INPUT:
+PUZZLE: numbers=[8, 12, 40], target=60, shape=bt_to_root
+ORIGINAL NUMBERS (the ONLY values allowed in the final answer): [8, 12, 40]
+
+EVENTS (in order — render the completion respecting this order):
+- STATE<state_0> [8, 12, 40]
+- ARITH 40 - 12 = 28
+- STATE<state_1> [8, (40 - 12)=28]
+- BACKTRACK<backtrack_0> reason: remaining=[8, 28], target=60 — no op reaches 60: 28+8=36, 28-8=20, 28*8=224, 28/8 not integer
+- RESUME state_0: the next STATE line is the restored checkpoint — emit it immediately after the backtrack token, with no preamble
+- STATE<state_0> [8, 12, 40]
+- ARITH 12 + 8 = 20
+- STATE<state_1> [(12 + 8)=20, 40]
+- ARITH 40 + (12 + 8) = 40 + 20 = 60
+- STATE<state_2> [(40 + (12 + 8))=60]
+- ANSWER<answer>(40 + (12 + 8))</answer>
+
+OUTPUT:
+<think>
+<state_0> [8, 12, 40]
+Target 60, and 40 is the natural anchor to build on. First attempt: peel 12 off it, 40 - 12 = 28, leaving 8 beside (40 - 12).
+<state_1> [8, (40 - 12)=28]
+Now only 8 and 28 are left, so I check every way to combine them against 60: 28 + 8 = 36, 28 - 8 = 20, 28 * 8 = 224, and 28 / 8 is not an integer — none reach 60. Subtracting first stranded me, so this whole branch is hopeless and I'll go back to the original numbers.
+<backtrack_0>
+<state_0> [8, 12, 40]
+Back at the start, I'll add the two small numbers before touching 40: 12 + 8 = 20.
+<state_1> [(12 + 8)=20, 40]
+That 20 lands cleanly on the anchor: 40 + (12 + 8) = 40 + 20 = 60, the target.
+<state_2> [(40 + (12 + 8))=60]
+</think>
+<answer> (40 + (12 + 8)) </answer>
+
+EXAMPLE 4 — multi_bt shape (two backtracks at different depths)
+
+INPUT:
+PUZZLE: numbers=[2, 3, 4, 6], target=36, shape=multi_bt
+ORIGINAL NUMBERS (the ONLY values allowed in the final answer): [2, 3, 4, 6]
+
+EVENTS (in order — render the completion respecting this order):
+- STATE<state_0> [2, 3, 4, 6]
+- ARITH 4 + 2 = 6
+- STATE<state_1> [3, (4 + 2)=6, 6]
+- ARITH 6 * (4 + 2) = 6 * 6 = 36
+- STATE<state_2> [3, (6 * (4 + 2))=36]
+- BACKTRACK<backtrack_1> reason: remaining=[3, 36], target=36 — no op reaches 36: 36+3=39, 36-3=33, 36*3=108, 36/3=12
+- RESUME state_1: the next STATE line is the restored checkpoint — emit it immediately after the backtrack token, with no preamble
+- STATE<state_1> [3, (4 + 2)=6, 6]
+- ARITH 6 + (4 + 2) = 6 + 6 = 12
+- STATE<state_2> [3, (6 + (4 + 2))=12]
+- ARITH (6 + (4 + 2)) - 3 = 12 - 3 = 9
+- STATE<state_3> [((6 + (4 + 2)) - 3)=9]
+- BACKTRACK<backtrack_2> reason: remaining=[9], target=36 — single value 9 ≠ 36
+- RESUME state_2: the next STATE line is the restored checkpoint — emit it immediately after the backtrack token, with no preamble
+- STATE<state_2> [3, (6 + (4 + 2))=12]
+- ARITH (6 + (4 + 2)) * 3 = 12 * 3 = 36
+- STATE<state_3> [((6 + (4 + 2)) * 3)=36]
+- ANSWER<answer>((6 + (4 + 2)) * 3)</answer>
+
+OUTPUT:
+<think>
+<state_0> [2, 3, 4, 6]
+Target 36 factors as 6 * 6, and I already hold one 6 — so if I manufacture a second 6 the product is exact. Make it: 4 + 2 = 6.
+<state_1> [3, (4 + 2)=6, 6]
+Now I have two 6's and a spare 3. Tempting to multiply the 6's right away: 6 * (4 + 2) = 6 * 6 = 36.
+<state_2> [3, (6 * (4 + 2))=36]
+But that leaves the 3 unused, and from [3, 36] nothing returns to 36: 36 + 3 = 39, 36 - 3 = 33, 36 * 3 = 108, 36 / 3 = 12 — every option misses. Spending both 6's at once was premature.
+<backtrack_1>
+<state_1> [3, (4 + 2)=6, 6]
+Back here, instead of multiplying the 6's I'll add them so the 3 stays free as a multiplier: 6 + (4 + 2) = 6 + 6 = 12.
+<state_2> [3, (6 + (4 + 2))=12]
+I first try closing with subtraction: (6 + (4 + 2)) - 3 = 12 - 3 = 9.
+<state_3> [((6 + (4 + 2)) - 3)=9]
+That bottoms out at the single value 9, nowhere near 36 — another dead end.
+<backtrack_2>
+<state_2> [3, (6 + (4 + 2))=12]
+Subtraction was the wrong operator here; multiplying the 12 by the leftover 3 scales it right up: (6 + (4 + 2)) * 3 = 12 * 3 = 36, exactly the target.
+<state_3> [((6 + (4 + 2)) * 3)=36]
+</think>
+<answer> ((6 + (4 + 2)) * 3) </answer>

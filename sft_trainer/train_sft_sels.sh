@@ -14,11 +14,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# v3 = chain-heavy warm-start (recommended). Override DATASET_NAME/WANDB_NAME_PREFIX
-# to sels_sft_v2 to train the full-structure variant for comparison.
-export DATASET_NAME="${DATASET_NAME:-dataset_generation/output/sels_sft_v3}"
+# v5 = every-op-state format with backtrack→state-immediate (no resume preamble),
+# 10 registered <state_*>/<backtrack_*> tokens. Override DATASET_NAME/WANDB_NAME_PREFIX
+# to an earlier sels_sft_v* dir to train a prior variant for comparison.
+export DATASET_NAME="${DATASET_NAME:-dataset_generation/output/sels_sft_v5}"
 export WANDB_PROJECT="${WANDB_PROJECT:-sels_sft}"
-export WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-sels_sft_v3}"
+export WANDB_NAME_PREFIX="${WANDB_NAME_PREFIX:-sels_sft_v5}"
 export LRS="${LRS:-5e-5}"
 export EPOCHS="${EPOCHS:-6}"
 # SELS extension: register the 10 <state_*>/<backtrack_*> tokens (default SFT leaves this off).

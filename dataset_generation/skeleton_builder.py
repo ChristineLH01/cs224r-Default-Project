@@ -166,15 +166,39 @@ def build_skeleton(
         return None
 
     if shape == "chain":
-        return _build_chain(nums, target, sol_path)
-    if shape == "bt_inner":
-        return _build_bt_inner(nums, target, sol_path, rng)
-    if shape == "bt_deep":
-        return _build_bt_deep(nums, target, sol_path, rng)
-    if shape == "bt_to_root":
-        return _build_bt_to_root(nums, target, sol_path, rng)
-    if shape == "multi_bt":
-        return _build_multi_bt(nums, target, sol_path, rng)
+        sk = _build_chain(nums, target, sol_path)
+    elif shape == "bt_inner":
+        sk = _build_bt_inner(nums, target, sol_path, rng)
+    elif shape == "bt_deep":
+        sk = _build_bt_deep(nums, target, sol_path, rng)
+    elif shape == "bt_to_root":
+        sk = _build_bt_to_root(nums, target, sol_path, rng)
+    elif shape == "multi_bt":
+        sk = _build_multi_bt(nums, target, sol_path, rng)
+    else:
+        raise ValueError(f"unknown shape {shape!r}")
+    if sk is not None:
+        sk.events = expand_states_v4(sk.numbers, sk.events)  # v4: mark a state after every op
+    return sk
+
+
+def expand_states_v4(root_nums: tuple[int, ...], events: list[Event]) -> list[Event]:
+    """v4 format: emit a StateEvent after EVERY arithmetic op (including dead-branch
+    ops) and after each resume, so every node in the search is an explicit state.
+    state_id = depth = (#original numbers) - (size of current multiset). Drops the
+    builders' checkpoint-only states and regenerates one per node.
+    """
+    n = len(root_nums)
+    out: list[Event] = [StateEvent(0, tuple(root_nums))]
+    for ev in events:
+        if isinstance(ev, StateEvent):
+            continue  # regenerate below
+        out.append(ev)
+        if isinstance(ev, ArithStep):
+            out.append(StateEvent(n - len(ev.remaining_after), ev.remaining_after))
+        elif isinstance(ev, ResumeEvent):
+            out.append(StateEvent(n - len(ev.numbers), ev.numbers))
+    return out
     raise ValueError(f"unknown shape {shape!r}")
 
 
@@ -488,8 +512,8 @@ def skeleton_to_spec(sk: Skeleton) -> str:
             lines.append(f"- BACKTRACK<backtrack_{ev.target_state_id}> reason: {ev.reason}")
         elif isinstance(ev, ResumeEvent):
             lines.append(
-                f"- RESUME (target state_{ev.target_state_id}) "
-                f'must open with exactly: "Resuming from numbers {state_list(anno.available)}. "'
+                f"- RESUME state_{ev.target_state_id}: the next STATE line is the restored "
+                f"checkpoint — emit it immediately after the backtrack token, with no preamble"
             )
         elif isinstance(ev, AnswerEvent):
             lines.append(f"- ANSWER<answer>{ev.equation_str}</answer>")
@@ -528,58 +552,42 @@ def _selftest() -> None:
                 assert e.state_id <= MAX_STATE_ID
             if isinstance(e, BacktrackEvent):
                 assert e.target_state_id <= MAX_STATE_ID
+        # v4 invariants: starts at state_0; every op is immediately followed by a
+        # StateEvent whose id == depth; every backtrack goes to a shallower state.
+        evs = sk.events
+        assert isinstance(evs[0], StateEvent) and evs[0].state_id == 0
+        for i, e in enumerate(evs):
+            if isinstance(e, ArithStep):
+                assert i + 1 < len(evs) and isinstance(evs[i + 1], StateEvent), "v4: op must be followed by a state"
+                assert evs[i + 1].state_id == len(source_nums) - len(e.remaining_after), "v4: state id must equal depth"
+            if isinstance(e, BacktrackEvent):
+                prior = [x.state_id for x in evs[:i] if isinstance(x, StateEvent)]
+                assert e.target_state_id < prior[-1], "v4: backtrack must go to a shallower state"
 
-    # 1. chain (3-num and 4-num)
-    sk = build_skeleton(list(nums3), t3, "chain", rng); assert_valid(sk, "chain", nums3)
-    sids = [e.state_id for e in sk.events if isinstance(e, StateEvent)]
-    assert sids == [0, 1], f"3-num chain should have state_0 and state_1 only, got {sids}"
-    sk = build_skeleton(list(nums4), t4, "chain", rng); assert_valid(sk, "chain", nums4)
-    sids = [e.state_id for e in sk.events if isinstance(e, StateEvent)]
-    assert sids == [0, 1, 2], f"4-num chain should have state_0/1/2, got {sids}"
+    # chain: no backtracks; assert_valid checks the v4 every-op-state invariant.
+    for n, t in [(nums3, t3), (nums4, t4)]:
+        sk = build_skeleton(list(n), t, "chain", rng); assert_valid(sk, "chain", n)
+        assert not any(isinstance(e, BacktrackEvent) for e in sk.events), "chain has no backtracks"
 
-    # 2. bt_inner (BT_1 to nearest non-root)
-    sk = build_skeleton(list(nums3), t3, "bt_inner", rng); assert_valid(sk, "bt_inner", nums3)
-    bts = [e.target_state_id for e in sk.events if isinstance(e, BacktrackEvent)]
-    assert bts == [1], f"bt_inner should BT to state_1 once, got {bts}"
-    sk = build_skeleton(list(nums4), t4, "bt_inner", rng); assert_valid(sk, "bt_inner", nums4)
-    bts = [e.target_state_id for e in sk.events if isinstance(e, BacktrackEvent)]
-    assert bts == [1]
+    # backtrack shapes: >=1 backtrack, all to shallower states (verified in assert_valid).
+    for shape in ["bt_inner", "bt_to_root"]:
+        sk = build_skeleton(list(nums3), t3, shape, rng)
+        if sk is not None:
+            assert_valid(sk, shape, nums3)
+            assert any(isinstance(e, BacktrackEvent) for e in sk.events), f"{shape} needs a backtrack"
+    for shape in ["bt_deep", "multi_bt"]:
+        sk = build_skeleton(list(nums4), t4, shape, rng)
+        if sk is not None:
+            assert_valid(sk, shape, nums4)
+            assert any(isinstance(e, BacktrackEvent) for e in sk.events), f"{shape} needs a backtrack"
+    assert build_skeleton(list(nums3), t3, "bt_deep", rng) is None    # infeasible (3-num)
+    assert build_skeleton(list(nums3), t3, "multi_bt", rng) is None   # infeasible (3-num)
 
-    # 3. bt_deep (BT_2, 4-num only)
-    sk = build_skeleton(list(nums4), t4, "bt_deep", rng)
-    if sk is not None:
-        assert_valid(sk, "bt_deep", nums4)
-        bts = [e.target_state_id for e in sk.events if isinstance(e, BacktrackEvent)]
-        assert bts == [2], f"bt_deep should BT to state_2, got {bts}"
-        sids = sorted({e.state_id for e in sk.events if isinstance(e, StateEvent)})
-        assert sids == [0, 1, 2]
-    # 3-num bt_deep is infeasible
-    assert build_skeleton(list(nums3), t3, "bt_deep", rng) is None
-
-    # 4. bt_to_root — state_1 should appear TWICE (once unsolvable, once reused after BT)
-    sk = build_skeleton(list(nums3), t3, "bt_to_root", rng)
-    if sk is not None:
-        assert_valid(sk, "bt_to_root", nums3)
-        s1_count = sum(1 for e in sk.events if isinstance(e, StateEvent) and e.state_id == 1)
-        assert s1_count == 2, f"bt_to_root should have state_1 twice (bad + reused), got {s1_count}"
-        bts = [e.target_state_id for e in sk.events if isinstance(e, BacktrackEvent)]
-        assert bts == [0]
-
-    # 5. multi_bt (BT_1 then BT_2, 4-num only)
-    sk = build_skeleton(list(nums4), t4, "multi_bt", rng)
-    if sk is not None:
-        assert_valid(sk, "multi_bt", nums4)
-        bts = [e.target_state_id for e in sk.events if isinstance(e, BacktrackEvent)]
-        assert bts == [1, 2], f"multi_bt should BT to 1 then 2, got {bts}"
-    assert build_skeleton(list(nums3), t3, "multi_bt", rng) is None  # infeasible
-
-    # 6. Spec rendering doesn't crash.
+    # Spec rendering doesn't crash.
     sk = build_skeleton(list(nums4), t4, "multi_bt", rng)
     if sk is not None:
         spec = skeleton_to_spec(sk)
-        assert "<state_0>" in spec and "<state_1>" in spec and "<state_2>" in spec
-        assert "<backtrack_1>" in spec and "<backtrack_2>" in spec
-        assert "Resuming from numbers" in spec
+        assert "<state_0>" in spec and "<backtrack_" in spec and "RESUME state_" in spec
 
     print("skeleton_builder selftest OK")
 

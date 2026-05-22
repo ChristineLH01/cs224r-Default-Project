@@ -22,7 +22,6 @@ from dataset_generation.skeleton_builder import (
     StateEvent,
     annotate_expressions,
     arith_fact,
-    available_tokens,
     state_list,
     skeleton_to_spec,
 )
@@ -160,58 +159,54 @@ def _check_equation_correctness(sk: Skeleton) -> None:
         )
 
 
-def _check_resume_anchors(completion: str, sk: Skeleton) -> None:
-    """For each ResumeEvent, the text immediately after the matching <backtrack_K>
-    must open with 'Resuming from numbers [...]' and list every restored number.
+def _check_state_lists(completion: str, sk: Skeleton) -> None:
+    """Every `<state_K>` token must be immediately followed (after optional
+    whitespace) by its EXACT bracket list, e.g. `<state_1> [44, (35 + 19)=54]`.
+
+    Walking in event order with a single cursor handles the same K reappearing
+    with different content (e.g. state_2 thrice in multi_bt). This also covers
+    the restored checkpoint after a backtrack: in v5 the `<backtrack_K>` token is
+    immediately followed by the restored `<state_K> [list]`, with no preamble, so
+    the restored state's number list is verified here rather than by a resume
+    anchor.
     """
-    # Pair each BacktrackEvent with its ResumeEvent (always immediately after in our skeletons).
     annos = annotate_expressions(sk)
-    resume_events = [
-        (e, anno) for e, anno in zip(sk.events, annos) if isinstance(e, ResumeEvent)
-    ]
-    # Locate each <backtrack_K> occurrence in order.
     cursor = 0
-    backtrack_positions: list[tuple[int, int]] = []  # (state_id, end_index in completion)
-    for ev in sk.events:
-        if isinstance(ev, BacktrackEvent):
-            tag = f"<backtrack_{ev.target_state_id}>"
-            idx = completion.find(tag, cursor)
-            if idx < 0:
-                raise ValidationError(f"backtrack tag {tag} not found")
-            backtrack_positions.append((ev.target_state_id, idx + len(tag)))
-            cursor = idx + len(tag)
-
-    if len(backtrack_positions) != len(resume_events):
-        raise ValidationError(
-            f"backtrack/resume count mismatch: {len(backtrack_positions)} vs {len(resume_events)}"
-        )
-
-    for (state_id, end_idx), (resume, anno) in zip(backtrack_positions, resume_events):
-        # Look at the next ~600 chars for the resume template before any arithmetic line.
-        window = completion[end_idx : end_idx + 600]
-        if "Resuming from numbers" not in window:
+    for ev, anno in zip(sk.events, annos):
+        if not isinstance(ev, StateEvent):
+            continue
+        tok = f"<state_{ev.state_id}>"
+        idx = completion.find(tok, cursor)
+        if idx < 0:
+            raise ValidationError(f"state token {tok} missing or out of order at cursor {cursor}")
+        after = completion[idx + len(tok):]
+        ws = len(after) - len(after.lstrip())
+        want = state_list(anno.available)
+        if not after.lstrip().startswith(want):
+            got = after.lstrip()[: len(want) + 20]
             raise ValidationError(
-                f"resume anchor missing after <backtrack_{state_id}>"
+                f"{tok} not immediately followed by its list; want {want!r}, got {got!r}"
             )
-        # Each restored expression-over-originals should appear in the anchor segment,
-        # so the restored state is stated in terms of the original numbers.
-        anchor_idx = window.find("Resuming from numbers")
-        anchor_segment = window[anchor_idx : anchor_idx + 300]
-        for token in available_tokens(anno.available):
-            if token not in anchor_segment:
-                raise ValidationError(
-                    f"resume anchor after <backtrack_{state_id}> missing token {token!r}"
-                )
+        cursor = idx + len(tok) + ws + len(want)
+
+
+def _check_single_think(completion: str) -> None:
+    """v4: exactly one <think>...</think> wrapping the search, with <answer> after it."""
+    if completion.count("<think>") != 1 or completion.count("</think>") != 1:
+        raise ValidationError("expected exactly one <think>...</think> block")
+    if "<answer>" in completion and completion.index("</think>") > completion.index("<answer>"):
+        raise ValidationError("<answer> must come after </think>")
 
 
 def validate(completion: str, sk: Skeleton) -> None:
-    """Run all 6 checks. Raise ValidationError on first failure."""
+    """Run all checks. Raise ValidationError on first failure."""
+    _check_single_think(completion)
     _check_tag_counts(completion, sk)
     _check_ordering(completion, sk)
     _check_arith_lines(completion, sk)
     _check_answer(completion, sk)
     _check_equation_correctness(sk)
-    _check_resume_anchors(completion, sk)
+    _check_state_lists(completion, sk)
 
 
 # ---------------------------------------------------------------------------
@@ -291,35 +286,37 @@ def _selftest() -> None:
 
     # Programmatically render a compliant completion from the skeleton events
     # so the test stays in sync with whatever shape we used above.
+    # v4: ONE <think> wraps the whole search; <answer> outside.
     annos = annotate_expressions(sk)
-    parts = []
+    answer = sk.events[-1]
+    parts = ["<think>"]
     for ev, anno in zip(sk.events, annos):
         if isinstance(ev, StateEvent):
-            parts.append(f"<state_{ev.state_id}>")
+            parts.append(f"<state_{ev.state_id}> {state_list(anno.available)}")
         elif isinstance(ev, ArithStep):
             parts.append(arith_fact(ev, anno))
         elif isinstance(ev, BacktrackEvent):
-            parts.append(f"<think>{ev.reason}</think>")
+            parts.append(ev.reason)
             parts.append(f"<backtrack_{ev.target_state_id}>")
         elif isinstance(ev, ResumeEvent):
-            parts.append(
-                f"<think>Resuming from numbers {state_list(anno.available)}. Trying another path.</think>"
-            )
-        elif isinstance(ev, AnswerEvent):
-            parts.append(f"<answer> {ev.equation_str} </answer>")
+            # v5: no preamble — the restored <state_K> (next event) renders the checkpoint.
+            continue
+    parts.append("</think>")
+    parts.append(f"<answer> {answer.equation_str} </answer>")
     good = "\n".join(parts)
 
     validate(good, sk)
     print("narrate_with_gpt validator passes a hand-crafted good completion")
 
-    # Negative test: missing resume anchor.
-    bad = good.replace("Resuming from numbers", "Trying instead")
+    # Negative test: a state token not immediately followed by its exact list.
+    state0_list = state_list(annos[0].available)
+    bad = good.replace(f"<state_0> {state0_list}", "<state_0> [999]", 1)
     try:
         validate(bad, sk)
     except ValidationError:
-        print("narrate_with_gpt validator correctly rejects missing resume anchor")
+        print("narrate_with_gpt validator correctly rejects a corrupted state list")
     else:
-        raise AssertionError("validator failed to catch missing resume anchor")
+        raise AssertionError("validator failed to catch corrupted state list")
 
     # Negative test: wrong arithmetic.
     first_arith = next(e for e in sk.events if isinstance(e, ArithStep))
@@ -333,7 +330,7 @@ def _selftest() -> None:
 
     # Negative test: cleanup strips a code fence.
     fenced = "```\n" + good + "\n```"
-    assert _cleanup(fenced).startswith("<state_0>")
+    assert _cleanup(fenced).startswith("<think>")
     print("narrate_with_gpt cleanup correctly strips code fences")
 
     # Negative test: cleanup unescapes backslashes.
