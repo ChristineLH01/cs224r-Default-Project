@@ -46,9 +46,6 @@ class SamplingWorker:
         self.tear_down()
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-        # SELS gate: only checkpoints carrying the structured tokens need faithful
-        # special-token decoding. Default checkpoints lack <state_0> -> stay on o.text.
-        self._has_sels_tokens = "<state_0>" in self.tokenizer.get_vocab()
         effective_max_model_len = self.max_model_len
         tokenizer_max_length = getattr(self.tokenizer, "model_max_length", None)
         if (
@@ -86,7 +83,9 @@ class SamplingWorker:
             n=self.group_size,
             stop=["</answer>"],
             include_stop_str_in_output=True,
-            logprobs=1
+            logprobs=1,
+            # SELS checkpoints keep <state_*>/<backtrack_*> in output; default unchanged.
+            skip_special_tokens="<state_0>" not in self.tokenizer.get_vocab(),
         )
 
     def update_model_path(self, model_path):
@@ -163,13 +162,7 @@ class SamplingWorker:
             curr_responses = []
             curr_logprobs = []
             for o in output.outputs:
-                if self._has_sels_tokens:
-                    text = self.tokenizer.decode(o.token_ids, skip_special_tokens=False)
-                    end = text.find("</answer>")
-                    text = text[: end + len("</answer>")] if end != -1 else text
-                else:
-                    text = o.text
-                curr_responses.append(text)
+                curr_responses.append(o.text)
                 curr_logprobs.append(self._extract_sequence_logprob(o))
             all_responses.append(curr_responses)
             all_logprobs.append(curr_logprobs)

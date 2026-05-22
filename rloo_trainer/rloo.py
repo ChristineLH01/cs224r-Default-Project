@@ -68,6 +68,7 @@ class RLOOTrainer:
         max_table_rows=20,
         save_every_n_steps=-1,
         save_dir='checkpoints/rloo_checkpoints',
+        inject_state0=False,
     ):
         self.model_name = model_name
         self.ref_model_name = self.model_name if ref_model_name is None else ref_model_name
@@ -102,7 +103,8 @@ class RLOOTrainer:
         self.max_table_rows = max_table_rows
         self.save_every_n_steps = save_every_n_steps
         self.save_dir = save_dir
-        
+        self.inject_state0 = inject_state0
+
         # DataLoader yields prompts + ground-truth metadata only.
         dataloaders = get_dataloaders(
             self.dataset_name, 
@@ -252,6 +254,13 @@ class RLOOTrainer:
 
                 all_prompts = batch['prompt']
                 all_ground_truth = batch['ground_truth']
+                if self.inject_state0:
+                    # SELS: seed the root state into the (masked) prompt so the model
+                    # starts inside the structure. Used for both sampling and the update.
+                    all_prompts = [
+                        f"{p}<state_0> {sorted(gt['numbers'])}\n"
+                        for p, gt in zip(all_prompts, all_ground_truth)
+                    ]
                 assert len(all_prompts) == len(all_ground_truth) == self.batch_size, f"len(all_prompts) = {len(all_prompts)}, len(all_ground_truth) = {len(all_ground_truth)}, self.batch_size = {self.batch_size}"
                 all_responses, all_sample_log_probs = ray.get(self.sampling_worker.generate.remote(all_prompts))
 
@@ -419,6 +428,8 @@ if __name__ == "__main__":
     parser.add_argument('--max_table_rows', type=int, default=20)
     parser.add_argument('--save_every_n_steps', type=int, default=-1) # -1 means don't save every n steps
     parser.add_argument('--save_dir', type=str, default='checkpoints/rloo_checkpoints')
+    parser.add_argument('--inject_state0', action='store_true',
+                        help='SELS only: seed "<state_0> [nums]" into each prompt. Default off.')
     args = parser.parse_args()
     if args.enable_chunked_prefill and args.disable_chunked_prefill:
         raise ValueError("Cannot set both --enable_chunked_prefill and --disable_chunked_prefill.")
