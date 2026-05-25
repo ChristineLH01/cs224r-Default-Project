@@ -1,8 +1,8 @@
 #!/bin/bash
 # Separate, self-contained SELS RLOO launcher. Does NOT modify the default
-# train_rloo_modal.sh. Starts RLOO from the SELS-SFT v3 warm-start and adds
-# --inject_state0 so each prompt is seeded with "<state_0> [nums]" (the model
-# can't reliably emit the opening state token; the context manager provides it).
+# train_rloo_modal.sh. Starts RLOO from the SELS-SFT v5 warm-start (10 registered
+# <state_*>/<backtrack_*> tokens). No --inject_state0: the v5 model emits
+# "<think>\n<state_0> [nums]\n…" on its own from the SFT'd format.
 #
 # Required before running:
 #   export WANDB_API_KEY=...   (HF_TOKEN if any gated repo)
@@ -22,9 +22,9 @@ export MODAL_VOLUME_NAME="${MODAL_VOLUME_NAME:-default-proj-training}"
 export MODAL_TIMEOUT_SECONDS="${MODAL_TIMEOUT_SECONDS:-86400}"
 export MODAL_STARTUP_TIMEOUT_SECONDS="${MODAL_STARTUP_TIMEOUT_SECONDS:-1800}"
 
-# SELS warm-start: the v3 checkpoint carries the 10 registered tokens; the
+# SELS warm-start: the v5 checkpoint carries the 10 registered tokens; the
 # trainer tokenizer MUST match it (so <state_*>/<backtrack_*> tokenize atomically).
-sels_ckpt="${MODEL_NAME:-/vol/checkpoints/sft_model/sels_sft/sels_sft_v3/best_model/model}"
+sels_ckpt="${MODEL_NAME:-/vol/checkpoints/sft_model/sels_sft/sels_sft_v5/best_model/model}"
 tokenizer_name="${TOKENIZER_NAME:-$sels_ckpt}"
 dataset_name="${DATASET_NAME:-asingh15/countdown_tasks_3to4}"
 wandb_project="${WANDB_PROJECT:-sels_rloo}"
@@ -34,7 +34,7 @@ curr_lr="${LR:-1e-5}"
 batch_size="${BATCH_SIZE:-128}"
 gradient_accumulation_steps="${GRADIENT_ACCUMULATION_STEPS:-128}"
 gradient_clipping="${GRADIENT_CLIPPING:-0.0}"
-group_size="${GROUP_SIZE:-16}"
+group_size="${GROUP_SIZE:-8}"
 num_training_steps="${NUM_TRAINING_STEPS:-100}"
 kl_divergence_coefficient="${KL_DIVERGENCE_COEFFICIENT:-0.001}"
 entropy_coefficient="${ENTROPY_COEFFICIENT:-0.001}"
@@ -46,9 +46,9 @@ temperature="${TEMPERATURE:-1.0}"
 top_k="${TOP_K:--1}"
 top_p="${TOP_P:-1.0}"
 min_p="${MIN_P:-0.0}"
-max_tokens="${MAX_TOKENS:-2048}"            # response length (v2 traces are long)
-max_model_len="${MAX_MODEL_LEN:-3072}"      # total context = prompt + max_tokens
-wandb_name="${WANDB_NAME:-sels_rloo_v3_gs${group_size}_lr${curr_lr}}"
+max_tokens="${MAX_TOKENS:-1024}"            # H100 + gs=8 + KL=0.001 OOMs at 2048 (10 GiB short); 1024 fits and matches v5 SFT training length
+max_model_len="${MAX_MODEL_LEN:-2048}"      # total context = prompt (≤512) + max_tokens (1024) with headroom
+wandb_name="${WANDB_NAME:-sels_rloo_v5_gs${group_size}_lr${curr_lr}_kl${kl_divergence_coefficient}_t${max_tokens}}"
 
 command=(
     modal run --detach "$PROJECT_ROOT/modal_train.py"
@@ -78,7 +78,8 @@ command=(
     --min_p "$min_p"
     --max_tokens "$max_tokens"
     --max_model_len "$max_model_len"
-    --inject_state0
+    # --inject_state0 dropped for v5: model with registered tokens + proper SFT
+    # emits "<think>\n<state_0> [...]" on its own; injection was a v2-era workaround.
 )
 
 printf 'Executing command: '

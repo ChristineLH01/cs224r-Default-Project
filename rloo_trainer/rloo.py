@@ -23,6 +23,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from evaluation.countdown import compute_score
+from rloo_trainer.process_reward import compute_process_reward
 import numpy as np
 from rloo_trainer.sampling_worker import SamplingWorker
 from rloo_trainer.rloo_update_worker import RLOOUpdateWorker
@@ -68,7 +69,9 @@ class RLOOTrainer:
         max_table_rows=20,
         save_every_n_steps=-1,
         save_dir='checkpoints/rloo_checkpoints',
-        inject_state0=False,
+        structural_coef=0.0,
+        context_restoration=False,
+        max_restoration_rounds=4,
     ):
         self.model_name = model_name
         self.ref_model_name = self.model_name if ref_model_name is None else ref_model_name
@@ -103,7 +106,16 @@ class RLOOTrainer:
         self.max_table_rows = max_table_rows
         self.save_every_n_steps = save_every_n_steps
         self.save_dir = save_dir
-        self.inject_state0 = inject_state0
+        # SELS structural PRM weight. 0.0 → baseline RLOO byte-identical.
+        # Recommended 0.5 (see project_sels_rloo_plan: keeps correctness dominance
+        # via the α ≤ 1 invariant while providing gradient on 0/G-correct groups).
+        self.structural_coef = structural_coef
+        # SELS context-restoration manager (segmented sampling with backtrack
+        # stops + cleaned re-prompt). False → sampler runs the byte-identical
+        # default `generate()` path; True → routes to
+        # `generate_with_context_restoration()`. See rloo_trainer/context_restoration.py.
+        self.context_restoration = context_restoration
+        self.max_restoration_rounds = max_restoration_rounds
 
         # DataLoader yields prompts + ground-truth metadata only.
         dataloaders = get_dataloaders(
@@ -129,6 +141,11 @@ class RLOOTrainer:
             ray.kill(self.update_worker)
             self.update_worker = None
         
+        # SELS context-restoration kwargs are passed only when enabled, so the
+        # default-mode constructor call is byte-identical to pre-session.
+        sels_kwargs = ({"enable_context_restoration": True,
+                        "max_restoration_rounds": self.max_restoration_rounds}
+                       if self.context_restoration else {})
         self.sampling_worker = SamplingWorker.remote(
             model_path=model_path,
             max_model_len=self.max_model_len,
@@ -141,7 +158,8 @@ class RLOOTrainer:
             top_k=self.top_k,
             min_p=self.min_p,
             max_tokens=self.max_tokens,
-            group_size=self.group_size
+            group_size=self.group_size,
+            **sels_kwargs,
         )
         ray.get(self.sampling_worker.load_checkpoint.remote())
         return self.sampling_worker
@@ -254,15 +272,13 @@ class RLOOTrainer:
 
                 all_prompts = batch['prompt']
                 all_ground_truth = batch['ground_truth']
-                if self.inject_state0:
-                    # SELS: seed the root state into the (masked) prompt so the model
-                    # starts inside the structure. Used for both sampling and the update.
-                    all_prompts = [
-                        f"{p}<state_0> {sorted(gt['numbers'])}\n"
-                        for p, gt in zip(all_prompts, all_ground_truth)
-                    ]
                 assert len(all_prompts) == len(all_ground_truth) == self.batch_size, f"len(all_prompts) = {len(all_prompts)}, len(all_ground_truth) = {len(all_ground_truth)}, self.batch_size = {self.batch_size}"
-                all_responses, all_sample_log_probs = ray.get(self.sampling_worker.generate.remote(all_prompts))
+                if self.context_restoration:
+                    all_responses, all_sample_log_probs = ray.get(
+                        self.sampling_worker.generate_with_context_restoration.remote(all_prompts)
+                    )
+                else:
+                    all_responses, all_sample_log_probs = ray.get(self.sampling_worker.generate.remote(all_prompts))
 
                 assert len(all_responses) == self.batch_size, f"len(all_responses) = {len(all_responses)}, self.batch_size = {self.batch_size}"
                 assert len(all_sample_log_probs) == self.batch_size, f"len(all_sample_log_probs) = {len(all_sample_log_probs)}, self.batch_size = {self.batch_size}"
@@ -279,14 +295,41 @@ class RLOOTrainer:
                 
                 # 2) Score sampled responses against task ground truth.
                 ### COMPUTE REWARDS ###
-                all_rewards = []
+                # When structural_coef > 0 the gradient reward is c + α·s, where
+                # c is compute_score and s is the structural PRM. The constant
+                # offset is irrelevant under LOO; what matters is the variance
+                # that s adds to A_i. α ≤ 1 preserves "correctness dominance"
+                # (every correct rollout outscores every wrong rollout). See
+                # project_sels_rloo_plan for the calibration derivation. With
+                # structural_coef == 0.0 this loop is byte-identical to the
+                # baseline (compute_process_reward is never called and
+                # `all_rewards == all_raw_rewards`).
+                all_rewards = []          # what the gradient sees (c + α·s)
+                all_raw_rewards = []      # raw compute_score (logged unchanged)
+                all_struct_scalars = []   # flat list of per-response s (logging)
+                all_struct_metrics = []   # flat list of per-response metric dicts
                 for curr_responses, curr_ground_truth in zip(all_responses, all_ground_truth):
                     curr_rewards = []
+                    curr_raw = []
                     for x in curr_responses:
-                        curr_rewards.append(compute_score(x, curr_ground_truth))
+                        c = compute_score(x, curr_ground_truth)
+                        curr_raw.append(c)
+                        r = c
+                        if self.structural_coef > 0:
+                            s, m = compute_process_reward(x, curr_ground_truth)
+                            r = c + self.structural_coef * s
+                            all_struct_scalars.append(s)
+                            all_struct_metrics.append(m)
+                        curr_rewards.append(r)
                     all_rewards.append(curr_rewards)
-                reward_mean = np.mean(all_rewards).item()
+                    all_raw_rewards.append(curr_raw)
+                # sampling/reward_mean stays the raw compute_score mean — same
+                # semantic as baseline runs so PRM-on/off plots are comparable.
+                reward_mean = np.mean(all_raw_rewards).item()
                 print('Reward Mean: ', reward_mean)
+                if self.structural_coef > 0:
+                    print('Total Reward Mean (c + α·s): ',
+                          float(np.mean(all_rewards)))
 
                 generation_table = self._build_generation_table(all_prompts, all_responses, all_rewards)
 
@@ -382,6 +425,29 @@ class RLOOTrainer:
                 if generation_table is not None:
                     log_dict["samples/generations"] = generation_table
 
+                # Structural PRM diagnostics — only emitted when the PRM is on.
+                # Default runs (structural_coef == 0.0) get no extra wandb keys.
+                if self.structural_coef > 0 and all_struct_metrics:
+                    log_dict["sampling/structural_reward_mean"] = float(
+                        np.mean(all_struct_scalars))
+                    log_dict["structural/sentinel_rate"] = float(np.mean([
+                        m.get("sentinel_no_events", False)
+                        or m.get("sentinel_excess_events", False)
+                        for m in all_struct_metrics
+                    ]))
+                    for rule in ("state_reference_valid", "state_depth_consistent",
+                                 "forward_transition_valid", "backtrack_transition_valid",
+                                 "active_state_consistent",
+                                 # arithmetic rules (added in PRM v3)
+                                 "operand_legal", "arith_correct",
+                                 # trace-level rules (added in PRM v2)
+                                 "think_well_formed", "no_special_tokens",
+                                 "answer_matches_final_state"):
+                        key = f"rule_{rule}_pass_rate"
+                        vals = [m[key] for m in all_struct_metrics if key in m]
+                        if vals:
+                            log_dict[f"structural/{rule}"] = float(np.mean(vals))
+
                 self.wandb.log(log_dict, step=global_step)
                 global_step += 1
         
@@ -428,8 +494,25 @@ if __name__ == "__main__":
     parser.add_argument('--max_table_rows', type=int, default=20)
     parser.add_argument('--save_every_n_steps', type=int, default=-1) # -1 means don't save every n steps
     parser.add_argument('--save_dir', type=str, default='checkpoints/rloo_checkpoints')
-    parser.add_argument('--inject_state0', action='store_true',
-                        help='SELS only: seed "<state_0> [nums]" into each prompt. Default off.')
+    parser.add_argument('--structural_coef', type=float, default=0.0,
+                        help='SELS only: weight α on the structural PRM. Total '
+                             'reward becomes compute_score + α·process_reward. '
+                             'Default 0.0 → byte-identical to baseline RLOO '
+                             '(PRM never called, no extra wandb keys). '
+                             'Recommended 0.5; must be ≤ 1.0 to preserve '
+                             'correctness dominance.')
+    parser.add_argument('--context_restoration', action='store_true',
+                        help='SELS only: route sampling through the segmented '
+                             'context-restoration manager. Each <backtrack_K> '
+                             'truncates the failed branch and re-prompts vLLM '
+                             'with a cleaned prefix so the model never sees the '
+                             'failed branch in its conditioning window. Default '
+                             'off → standard generate() path, byte-identical to '
+                             'baseline RLOO.')
+    parser.add_argument('--max_restoration_rounds', type=int, default=4,
+                        help='SELS only: hard cap on segmented sampling rounds '
+                             'per completion when --context_restoration is set. '
+                             'Ignored otherwise.')
     args = parser.parse_args()
     if args.enable_chunked_prefill and args.disable_chunked_prefill:
         raise ValueError("Cannot set both --enable_chunked_prefill and --disable_chunked_prefill.")

@@ -44,7 +44,7 @@ if __name__ == "__main__":
     tokenizer, llm = load_checkpoint(args.model_path, args.max_model_len, args.gpu_memory_utilization, args.max_num_batched_tokens, args.enable_chunked_prefill, args.max_num_seqs)
 
     # 2) Configure sampling with pass@k style multiple responses.
-    sampling_params = SamplingParams(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k, min_p=args.min_p, max_tokens=args.max_tokens, n=args.num_responses, skip_special_tokens=False)
+    sampling_params = SamplingParams(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k, min_p=args.min_p, max_tokens=args.max_tokens, n=args.num_responses, skip_special_tokens=False, stop=["</answer>"], include_stop_str_in_output=True)
 
     # 3) Load evaluation prompts and generate responses in batch.
     loaded_dataset = load_dataset(args.eval_dataset, split='test')
