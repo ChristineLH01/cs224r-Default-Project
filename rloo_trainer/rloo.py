@@ -24,6 +24,7 @@ if PROJECT_ROOT not in sys.path:
 
 from evaluation.countdown import compute_score
 from rloo_trainer.process_reward import compute_process_reward
+from rloo_trainer.arithmetic_prm import compute_arithmetic_prm
 import numpy as np
 from rloo_trainer.sampling_worker import SamplingWorker
 from rloo_trainer.rloo_update_worker import RLOOUpdateWorker
@@ -70,6 +71,7 @@ class RLOOTrainer:
         save_every_n_steps=-1,
         save_dir='checkpoints/rloo_checkpoints',
         structural_coef=0.0,
+        arithmetic_coef=0.0,
         context_restoration=False,
         max_restoration_rounds=4,
     ):
@@ -110,6 +112,11 @@ class RLOOTrainer:
         # Recommended 0.5 (see project_sels_rloo_plan: keeps correctness dominance
         # via the α ≤ 1 invariant while providing gradient on 0/G-correct groups).
         self.structural_coef = structural_coef
+        # Arithmetic PRM weight for the default-SFT substrate (no SELS tokens).
+        # 0.0 → baseline RLOO byte-identical. PRM penalty internally lives in
+        # [-0.5, 0] (β=0.1, γ=0.2, cap=0.5 in rloo_trainer/arithmetic_prm.py);
+        # arithmetic_coef = α scales that to [-α/2, 0]. Recommended α = 1.0.
+        self.arithmetic_coef = arithmetic_coef
         # SELS context-restoration manager (segmented sampling with backtrack
         # stops + cleaned re-prompt). False → sampler runs the byte-identical
         # default `generate()` path; True → routes to
@@ -259,6 +266,11 @@ class RLOOTrainer:
         """Run online RLOO training for `num_training_steps` updates."""
         last_checkpoint_dir = None
         global_step = 0
+        # Track best raw training reward for `best_checkpoint/` snapshots.
+        # Caveat: reward_mean isn't a perfect pass@1 proxy (v1 unconditional
+        # arith PRM had climbing reward while pass@1 fell). Periodic
+        # epoch_N_step_M snapshots remain the ground-truth record.
+        best_reward = float('-inf')
         for epoch in range(self.num_epochs):
             if global_step > 0 and global_step == self.num_training_steps: break
             for train_iter, batch in enumerate(self.train_dataloader):
@@ -304,10 +316,12 @@ class RLOOTrainer:
                 # structural_coef == 0.0 this loop is byte-identical to the
                 # baseline (compute_process_reward is never called and
                 # `all_rewards == all_raw_rewards`).
-                all_rewards = []          # what the gradient sees (c + α·s)
+                all_rewards = []          # what the gradient sees (c + α·s + α'·a)
                 all_raw_rewards = []      # raw compute_score (logged unchanged)
                 all_struct_scalars = []   # flat list of per-response s (logging)
                 all_struct_metrics = []   # flat list of per-response metric dicts
+                all_arith_scalars = []    # flat list of per-response arithmetic-PRM
+                all_arith_metrics = []    # flat list of per-response arith metric dicts
                 for curr_responses, curr_ground_truth in zip(all_responses, all_ground_truth):
                     curr_rewards = []
                     curr_raw = []
@@ -317,9 +331,14 @@ class RLOOTrainer:
                         r = c
                         if self.structural_coef > 0:
                             s, m = compute_process_reward(x, curr_ground_truth)
-                            r = c + self.structural_coef * s
+                            r = r + self.structural_coef * s
                             all_struct_scalars.append(s)
                             all_struct_metrics.append(m)
+                        if self.arithmetic_coef > 0:
+                            a, am = compute_arithmetic_prm(x, curr_ground_truth)
+                            r = r + self.arithmetic_coef * a
+                            all_arith_scalars.append(a)
+                            all_arith_metrics.append(am)
                         curr_rewards.append(r)
                     all_rewards.append(curr_rewards)
                     all_raw_rewards.append(curr_raw)
@@ -327,8 +346,8 @@ class RLOOTrainer:
                 # semantic as baseline runs so PRM-on/off plots are comparable.
                 reward_mean = np.mean(all_raw_rewards).item()
                 print('Reward Mean: ', reward_mean)
-                if self.structural_coef > 0:
-                    print('Total Reward Mean (c + α·s): ',
+                if self.structural_coef > 0 or self.arithmetic_coef > 0:
+                    print('Total Reward Mean (c + PRM contributions): ',
                           float(np.mean(all_rewards)))
 
                 generation_table = self._build_generation_table(all_prompts, all_responses, all_rewards)
@@ -389,6 +408,19 @@ class RLOOTrainer:
                 ray.get(self.update_worker.save_checkpoint.remote())
                 last_checkpoint_dir = save_dir
 
+                # Best-checkpoint snapshot by raw training reward_mean.
+                # Copies the just-saved directory whenever this step beats
+                # the prior best. Periodic + latest snapshots are untouched.
+                if reward_mean > best_reward:
+                    best_reward = reward_mean
+                    best_dir = os.path.join(self.save_dir, self.wandb_project,
+                                            self.wandb_name, "best_checkpoint")
+                    if os.path.exists(best_dir):
+                        shutil.rmtree(best_dir)
+                    shutil.copytree(save_dir, best_dir)
+                    print(f"NEW BEST reward = {reward_mean:.4f} at step "
+                          f"{global_step}; snapshot → {best_dir}")
+
                 print("-" * 100)
                 print(f"Epoch {epoch}, Global Step {global_step}")
                 scientific_metric_names = {
@@ -448,6 +480,21 @@ class RLOOTrainer:
                         if vals:
                             log_dict[f"structural/{rule}"] = float(np.mean(vals))
 
+                # Arithmetic PRM diagnostics — only emitted when the PRM is on.
+                # Default runs (arithmetic_coef == 0.0) get no extra wandb keys.
+                if self.arithmetic_coef > 0 and all_arith_metrics:
+                    log_dict["sampling/arithmetic_reward_mean"] = float(
+                        np.mean(all_arith_scalars))
+                    log_dict["arithmetic/n_total_ops_mean"] = float(
+                        np.mean([m["n_total_ops"]      for m in all_arith_metrics]))
+                    log_dict["arithmetic/n_total_mistakes_mean"] = float(
+                        np.mean([m["n_total_mistakes"] for m in all_arith_metrics]))
+                    log_dict["arithmetic/n_repeated_mistakes_mean"] = float(
+                        np.mean([m["n_repeated_mistakes"] for m in all_arith_metrics]))
+                    log_dict["arithmetic/rollouts_with_mistake_rate"] = float(
+                        np.mean([1.0 if m["n_total_mistakes"] > 0 else 0.0
+                                 for m in all_arith_metrics]))
+
                 self.wandb.log(log_dict, step=global_step)
                 global_step += 1
         
@@ -501,6 +548,14 @@ if __name__ == "__main__":
                              '(PRM never called, no extra wandb keys). '
                              'Recommended 0.5; must be ≤ 1.0 to preserve '
                              'correctness dominance.')
+    parser.add_argument('--arithmetic_coef', type=float, default=0.0,
+                        help='Default-substrate PRM: weight α on the '
+                             'arithmetic PRM (negative-only + repetition '
+                             'kicker, internal range [-0.5, 0]). Total reward '
+                             'becomes compute_score + α·arithmetic_prm. '
+                             'Default 0.0 → byte-identical to baseline RLOO. '
+                             'Recommended 1.0 (max penalty -0.5). See '
+                             'rloo_trainer/arithmetic_prm.py.')
     parser.add_argument('--context_restoration', action='store_true',
                         help='SELS only: route sampling through the segmented '
                              'context-restoration manager. Each <backtrack_K> '

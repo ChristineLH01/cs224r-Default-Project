@@ -59,7 +59,27 @@ def _build_secret_list() -> list[modal.Secret]:
 
 base_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .add_local_dir(str(LOCAL_PROJECT_ROOT), remote_path=str(REMOTE_PROJECT_ROOT), copy=True)
+    .add_local_dir(
+        str(LOCAL_PROJECT_ROOT),
+        remote_path=str(REMOTE_PROJECT_ROOT),
+        copy=True,
+        # Mirror .gitignore — don't ship the local virtualenv, build/run
+        # artifacts, secrets, or generated eval data with every image build.
+        # Modal installs deps from modal_requirements.txt server-side.
+        ignore=[
+            ".venv", ".venv/**",
+            "__pycache__", "**/__pycache__", "*.pyc",
+            ".git", ".git/**",
+            "wandb", "wandb/**",
+            "logs", "logs/**",
+            ".DS_Store", "**/.DS_Store",
+            ".env",
+            "evaluation/eval_results", "evaluation/eval_results/**",
+            "dataset_generation/output", "dataset_generation/output/**",
+            "default_project.egg-info", "default_project.egg-info/**",
+            "*.bak", "*.gen.log", "*.ckpt", "*.pt",
+        ],
+    )
     .run_commands(
         (
             f"cd {shlex.quote(str(REMOTE_PROJECT_ROOT))} && "
