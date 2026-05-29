@@ -236,11 +236,40 @@ def run_smoke(smoke_args: list[str]) -> str:
     return _run_training("sample_smoke.py", smoke_args)
 
 
+@app.function(
+    image=base_image,
+    gpu=GPU_CONFIG,
+    cpu=CPU_COUNT,
+    timeout=TIMEOUT_SECONDS,
+    startup_timeout=STARTUP_TIMEOUT_SECONDS,
+    volumes={str(REMOTE_VOLUME_ROOT): TRAINING_VOLUME},
+    secrets=_build_secret_list(),
+)
+def run_sample_train(sample_args: list[str]) -> str:
+    # Sample N rollouts per TRAIN-split prompt for Stage 2 SFT data generation.
+    return _run_training("evaluation/sample_train_rollouts.py", sample_args)
+
+
+@app.function(
+    image=base_image,
+    gpu=GPU_CONFIG,
+    cpu=CPU_COUNT,
+    timeout=TIMEOUT_SECONDS,
+    startup_timeout=STARTUP_TIMEOUT_SECONDS,
+    volumes={str(REMOTE_VOLUME_ROOT): TRAINING_VOLUME},
+    secrets=_build_secret_list(),
+)
+def run_ipo_anti_ramble(trainer_args: list[str]) -> str:
+    # IPO extension: pairwise preference learning targeting rambling / wrong-answer
+    # rollouts against shorter correct rollouts.
+    return _run_training("ipo_extension/train_ipo_anti_ramble.py", trainer_args)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Launch one of the existing training entrypoints on Modal.",
     )
-    parser.add_argument("trainer", choices=("sft", "ipo", "rloo", "eval", "smoke"))
+    parser.add_argument("trainer", choices=("sft", "ipo", "rloo", "eval", "smoke", "sample_train", "ipo_anti_ramble"))
     parser.add_argument(
         "trainer_args",
         nargs=argparse.REMAINDER,
@@ -266,6 +295,10 @@ def main(*raw_args: str) -> None:
         result = run_eval.remote(trainer_args)
     elif args.trainer == "smoke":
         result = run_smoke.remote(trainer_args)
+    elif args.trainer == "sample_train":
+        result = run_sample_train.remote(trainer_args)
+    elif args.trainer == "ipo_anti_ramble":
+        result = run_ipo_anti_ramble.remote(trainer_args)
     else:
         result = run_rloo.remote(trainer_args)
 
