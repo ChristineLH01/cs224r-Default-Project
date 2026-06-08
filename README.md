@@ -1,17 +1,17 @@
-# Countdown Post-Training: Stacked Methods + Structured Backtracking
+# Countdown Post-Training: Structured Backtracking + Stacked Methods
 
 Post-training of Qwen2.5-0.5B on the **Countdown** arithmetic task (reach a target
 by combining given numbers with `+ - * /`). The project implements the full
 post-training pipeline — SFT → IPO → RLOO → evaluation — and extends it along two
 independent research lines:
 
-- **Line A — Stacked post-training** (the headline results in
+- **Line A — SELS** (Structured Exploration with Latent States): teach explicit
+  `<state_K>` / `<backtrack_J>` search structure via synthetic SFT, then refine it
+  with RLOO + a structural process-reward model.
+- **Line B — Stacked post-training** (the headline results in
   [`evaluation/report.md`](evaluation/report.md)): three methods stacked on the
   default SFT checkpoint — **Arithmetic PRM → RFT → IPO anti-ramble** — each
   targeting a distinct failure axis (arithmetic mistakes, low pass@1, rambling).
-- **Line B — SELS** (Structured Exploration with Latent States): teach explicit
-  `<state_K>` / `<backtrack_J>` search structure via synthetic SFT, then refine it
-  with RLOO + a structural process-reward model.
 
 Both lines train on `asingh15/countdown_tasks_3to4` and share the evaluation
 harness. Training/eval run locally (CUDA GPU) or remotely on Modal via the shared
@@ -32,27 +32,27 @@ modal_train.py                 # shared Modal app/entrypoint for all remote trai
 
 sft_trainer/                   # SFT (base): train loop + dataset + launchers
   sft.py  sft_dataset.py  train_sft.sh  train_sft_modal.sh
-  train_sft_sels.sh            #   [Line B] SFT on the synthetic SELS dataset
+  train_sft_sels.sh            #   [Line A] SFT on the synthetic SELS dataset
 
 ipo_trainer/                   # IPO (base): preference-tuning train loop + dataset
   ipo.py  ipo_dataset.py  train_ipo.sh  train_ipo_modal.sh
 
 rloo_trainer/                  # RLOO (base): orchestration + update/sampling workers
   rloo.py  rloo_update_worker.py  sampling_worker.py  rloo_dataset.py
-  arithmetic_prm.py            #   [Line A] arithmetic process-reward model
-  process_reward.py            #   [Line B] structural process-reward model (SELS grammar)
-  context_restoration.py       #   [Line B] backtrack context manager for rollouts
-  train_rloo_default*.sh       #   [Line A] default RLOO + arithmetic-PRM launchers
-  train_rloo_sels*.sh          #   [Line B] SELS RLOO (baseline + structural PRM)
+  process_reward.py            #   [Line A] structural process-reward model (SELS grammar)
+  context_restoration.py       #   [Line A] backtrack context manager for rollouts
+  arithmetic_prm.py            #   [Line B] arithmetic process-reward model
+  train_rloo_sels*.sh          #   [Line A] SELS RLOO (baseline + structural PRM)
+  train_rloo_default*.sh       #   [Line B] default RLOO + arithmetic-PRM launchers
 
-dataset_generation/            # [Line B] synthetic SELS SFT-data pipeline
+dataset_generation/            # [Line A] synthetic SELS SFT-data pipeline
   countdown_solver.py  skeleton_builder.py  narrate_with_gpt.py
   generate_sft_data.py  prompts/  README.md   # data-format spec + invariants
 
-rft_extension/                 # [Line A] rejection-sampling fine-tuning
+rft_extension/                 # [Line B] rejection-sampling fine-tuning
   synthesize_rft_data.py  train_rft.sh  train_rft_v3.sh  eval_*.sh  analyze_compare.py
 
-ipo_extension/                 # [Line A] IPO anti-ramble preference tuning
+ipo_extension/                 # [Line B] IPO anti-ramble preference tuning
   synthesize_ipo_pairs.py  train_ipo_anti_ramble.sh  train_ipo_anti_ramble_v2.sh
 
 evaluation/
@@ -61,12 +61,12 @@ evaluation/
   analyze_failure_modes.py     # CORRECT / NO-ANSWER / BAD-NUMS / WRONG-VAL decomposition
   compare_failure_modes.py     # cross-model comparison table
   sample_modal*.sh             # per-model Modal eval launchers
-  report.md                    # detailed results report (Line A)
+  report.md                    # detailed results report (Line B)
   view_passk.ipynb             # pass@k / loss-curve notebook
 ```
 
 The reward models are wired into `rloo_trainer/rloo.py` behind coefficient flags
-(`--arithmetic_coef`, `--structural_coef`). With both at `0.0` (the default) RLOO
+(`--structural_coef`, `--arithmetic_coef`). With both at `0.0` (the default) RLOO
 training is identical to the base behavior; the reward models are pure additions.
 
 ## Setup
@@ -81,7 +81,7 @@ Auth (set before launching anything):
 ```bash
 export WANDB_API_KEY=...        # experiment tracking
 export HF_TOKEN=...             # model/dataset access
-export OPENAI_API_KEY=...       # only for Line B data synthesis (GPT narrator)
+export OPENAI_API_KEY=...       # only for Line A (SELS) data synthesis (GPT narrator)
 ```
 
 Optional Modal (remote H100). After `modal setup`, the `*_modal.sh` / `sample_modal*.sh`
@@ -106,7 +106,23 @@ bash rloo_trainer/train_rloo_modal.sh    # RLOO   (MODEL_NAME / DATASET_NAME via
 
 `evaluation/view_passk.ipynb` holds the pass@k analysis for these stages.
 
-### Line A — stacked post-training (recreates `report.md`)
+### Line A — SELS structured backtracking
+
+```bash
+.venv/bin/python dataset_generation/generate_sft_data.py   # → dataset_generation/output/sels_sft_v5 (needs OPENAI_API_KEY)
+bash sft_trainer/train_sft_sels.sh                         # SFT warm-start on SELS data
+bash rloo_trainer/train_rloo_sels.sh                       # RLOO baseline (no PRM)
+bash rloo_trainer/train_rloo_sels_prm.sh                   # RLOO + structural PRM (--structural_coef 0.5)
+```
+
+The structural PRM (`rloo_trainer/process_reward.py`) scores each rollout against
+the SELS grammar (valid state references, forward/backtrack transitions, depth
+consistency, well-formed `<think>`/`<answer>`, no leaked special tokens). Its
+self-test confirms the checks: `.venv/bin/python rloo_trainer/process_reward.py`
+(all v5-SFT sample rows score 1.000). Data format is specified in
+[`dataset_generation/README.md`](dataset_generation/README.md).
+
+### Line B — stacked post-training (recreates `report.md`)
 
 A single warm-start chain; run the stages in order, each training from the
 previous checkpoint.
@@ -138,22 +154,6 @@ Data synthesis (run before the stage that consumes it):
 
 Ablation (`report.md` §6): `ipo_extension/train_ipo_anti_ramble_v2.sh` reproduces
 IPO v2, validating the v1 design choice.
-
-### Line B — SELS structured backtracking
-
-```bash
-.venv/bin/python dataset_generation/generate_sft_data.py   # → dataset_generation/output/sels_sft_v5 (needs OPENAI_API_KEY)
-bash sft_trainer/train_sft_sels.sh                         # SFT warm-start on SELS data
-bash rloo_trainer/train_rloo_sels.sh                       # RLOO baseline (no PRM)
-bash rloo_trainer/train_rloo_sels_prm.sh                   # RLOO + structural PRM (--structural_coef 0.5)
-```
-
-The structural PRM (`rloo_trainer/process_reward.py`) scores each rollout against
-the SELS grammar (valid state references, forward/backtrack transitions, depth
-consistency, well-formed `<think>`/`<answer>`, no leaked special tokens). Its
-self-test confirms the checks: `.venv/bin/python rloo_trainer/process_reward.py`
-(all v5-SFT sample rows score 1.000). Data format is specified in
-[`dataset_generation/README.md`](dataset_generation/README.md).
 
 ### Evaluation (both lines)
 
