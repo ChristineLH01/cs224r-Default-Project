@@ -8,10 +8,9 @@ independent research lines:
 - **Line A — SELS** (Structured Exploration with Latent States): teach explicit
   `<state_K>` / `<backtrack_J>` search structure via synthetic SFT, then refine it
   with RLOO + a structural process-reward model.
-- **Line B — Stacked post-training** (the headline results in
-  [`evaluation/report.md`](evaluation/report.md)): three methods stacked on the
-  default SFT checkpoint — **Arithmetic PRM → RFT → IPO anti-ramble** — each
-  targeting a distinct failure axis (arithmetic mistakes, low pass@1, rambling).
+- **Line B — Stacked post-training**: three methods stacked on the default SFT
+  checkpoint — **Arithmetic PRM → RFT → IPO anti-ramble** — each targeting a
+  distinct failure axis (arithmetic mistakes, low pass@1, rambling).
 
 Both lines train on `asingh15/countdown_tasks_3to4` and share the evaluation
 harness. Training/eval run locally (CUDA GPU) or remotely on Modal via the shared
@@ -47,7 +46,7 @@ rloo_trainer/                  # RLOO (base): orchestration + update/sampling wo
 
 dataset_generation/            # [Line A] synthetic SELS SFT-data pipeline
   countdown_solver.py  skeleton_builder.py  narrate_with_gpt.py
-  generate_sft_data.py  prompts/  README.md   # data-format spec + invariants
+  generate_sft_data.py  prompts/              # GPT narrator → HF SELS dataset
 
 rft_extension/                 # [Line B] rejection-sampling fine-tuning
   synthesize_rft_data.py  train_rft.sh  train_rft_v3.sh  eval_*.sh  analyze_compare.py
@@ -61,8 +60,6 @@ evaluation/
   analyze_failure_modes.py     # CORRECT / NO-ANSWER / BAD-NUMS / WRONG-VAL decomposition
   compare_failure_modes.py     # cross-model comparison table
   sample_modal*.sh             # per-model Modal eval launchers
-  report.md                    # detailed results report (Line B)
-  view_passk.ipynb             # pass@k / loss-curve notebook
 ```
 
 The reward models are wired into `rloo_trainer/rloo.py` behind coefficient flags
@@ -104,8 +101,6 @@ bash ipo_trainer/train_ipo_modal.sh      # IPO
 bash rloo_trainer/train_rloo_modal.sh    # RLOO   (MODEL_NAME / DATASET_NAME via the launcher)
 ```
 
-`evaluation/view_passk.ipynb` holds the pass@k analysis for these stages.
-
 ### Line A — SELS structured backtracking
 
 ```bash
@@ -119,10 +114,9 @@ The structural PRM (`rloo_trainer/process_reward.py`) scores each rollout agains
 the SELS grammar (valid state references, forward/backtrack transitions, depth
 consistency, well-formed `<think>`/`<answer>`, no leaked special tokens). Its
 self-test confirms the checks: `.venv/bin/python rloo_trainer/process_reward.py`
-(all v5-SFT sample rows score 1.000). Data format is specified in
-[`dataset_generation/README.md`](dataset_generation/README.md).
+(all v5-SFT sample rows score 1.000).
 
-### Line B — stacked post-training (recreates `report.md`)
+### Line B — stacked post-training
 
 A single warm-start chain; run the stages in order, each training from the
 previous checkpoint.
@@ -152,8 +146,8 @@ Data synthesis (run before the stage that consumes it):
     --top_k 2 --min_rambling_length 1200
 ```
 
-Ablation (`report.md` §6): `ipo_extension/train_ipo_anti_ramble_v2.sh` reproduces
-IPO v2, validating the v1 design choice.
+Ablation: `ipo_extension/train_ipo_anti_ramble_v2.sh` reproduces IPO v2, which
+validates the v1 design choice (engineered surface contrasts underperform).
 
 ### Evaluation (both lines)
 
@@ -167,8 +161,6 @@ bash evaluation/sample_modal_default_rloo.sh       # or sample_modal_default_ari
 .venv/bin/python evaluation/analyze_failure_modes.py   # per-model outcome decomposition
 .venv/bin/python evaluation/compare_failure_modes.py   # cross-model table
 ```
-
-The headline numbers these reproduce are in [`evaluation/report.md`](evaluation/report.md) §4.
 
 ## Dataset schemas
 
